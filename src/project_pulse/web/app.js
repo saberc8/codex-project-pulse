@@ -11,16 +11,21 @@ const state = {
   limit: 40,
   error: "",
   modal: null,
+  showDone: false,
+  fromList: false,
   busy: false,
-  expandedProjects: new Set(),
+  manualSync: false,
 };
+let composing = false;
+
 const labels = {
-  running: "进行中",
-  completed: "本轮已完成",
+  running: "正在运行",
+  completed: "本轮完成",
   failed: "运行失败",
   interrupted: "已中断",
   unknown: "状态未知",
 };
+
 const esc = (value) =>
   String(value ?? "").replace(
     /[&<>"']/g,
@@ -36,6 +41,7 @@ const icons = () =>
 const project = (id) => state.data?.projects.find((p) => p.id === id);
 const session = (id) => state.data?.sessions.find((s) => s.id === id);
 const pname = (id) => project(id)?.name || "项目已移除";
+
 const relative = (seconds) => {
   if (!seconds) return "暂无动态";
   const d = Math.max(0, Date.now() / 1000 - seconds);
@@ -48,6 +54,7 @@ const relative = (seconds) => {
     day: "numeric",
   });
 };
+
 const today = () =>
   new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Shanghai",
@@ -55,20 +62,24 @@ const today = () =>
     month: "2-digit",
     day: "2-digit",
   }).format(new Date());
+
 const activeTodos = () => state.data.todos.filter((t) => t.status !== "done");
 const unreadTotal = () =>
   state.data.source.readStateAvailable === false
     ? null
     : state.data.sessions.filter((s) => s.needsReview).length;
+
 function sortedProjects() {
   return [...state.data.projects].sort(
     (a, b) =>
       Number(b.pinned) - Number(a.pinned) ||
       (b.unread > 0) - (a.unread > 0) ||
       (b.running > 0) - (a.running > 0) ||
+      (b.todoCount > 0) - (a.todoCount > 0) ||
       b.updatedAt - a.updatedAt,
   );
 }
+
 function sortedTodos(items) {
   return [...items].sort(
     (a, b) =>
@@ -78,21 +89,51 @@ function sortedTodos(items) {
       b.createdAt - a.createdAt,
   );
 }
-function badge(s) {
-  const unread = s.needsReview;
-  return `<span class="badge ${unread ? "unread" : esc(s.status)}">${icon(unread ? "mail" : s.status === "running" ? "loader-circle" : s.status === "completed" ? "check" : s.status === "failed" ? "circle-alert" : "circle")}${unread ? "完成未读" : labels[s.status] || "状态未知"}</span>`;
+
+function sortedProjectSessions(projectId) {
+  return state.data.sessions
+    .filter((s) => s.projectId === projectId)
+    .sort(
+      (a, b) =>
+        Number(b.needsReview) - Number(a.needsReview) ||
+        (b.status === "running") - (a.status === "running") ||
+        b.updatedAt - a.updatedAt,
+    );
 }
+
+function statusState(s) {
+  return s.needsReview ? "unread" : s.status || "unknown";
+}
+
+function statusText(s) {
+  const tone = s.needsReview
+    ? "unread"
+    : s.status === "running"
+      ? "running"
+      : s.status === "failed"
+        ? "failed"
+        : "muted";
+  const text = s.needsReview ? "待看结果" : labels[s.status] || "状态未知";
+  return `<span class="state-text ${tone}">${esc(text)}</span>`;
+}
+
 const agentCounts = new WeakMap();
 function multiAgent() {
   const d = state.data;
   if (!d) return false;
-  if (!agentCounts.has(d)) agentCounts.set(d, new Set(d.sessions.map((s) => s.agent || "codex")).size);
+  if (!agentCounts.has(d))
+    agentCounts.set(
+      d,
+      new Set(d.sessions.map((s) => s.agent || "codex")).size,
+    );
   return agentCounts.get(d) > 1;
 }
+
 // Which agent a chat belongs to; shown only when more than one agent has sessions.
 function agentLabel(s) {
   return multiAgent() ? s.agentLabel || "Codex" : "";
 }
+
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
@@ -115,13 +156,15 @@ async function copyText(text) {
   area.remove();
   return copied;
 }
+
 function toast(message) {
   const el = document.querySelector("#toast");
   el.textContent = message;
   el.classList.add("show");
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => el.classList.remove("show"), 3500);
+  toast.timer = setTimeout(() => el.classList.remove("show"), 3200);
 }
+
 async function request(url, body, retried = false) {
   if (window.PulseHost) return window.PulseHost.request(url, body);
   const res = await fetch(
@@ -154,9 +197,12 @@ async function request(url, body, retried = false) {
   if (!res.ok) throw Error(value.error || "请求失败");
   return value;
 }
-async function refresh(initial = false) {
+
+async function refresh(initial = false, manual = false) {
   if (state.busy) return;
   state.busy = true;
+  state.manualSync = manual;
+  if (manual) render();
   try {
     if (initial || !state.token) {
       const boot = await request("/api/bootstrap");
@@ -172,8 +218,10 @@ async function refresh(initial = false) {
     render();
   } finally {
     state.busy = false;
+    state.manualSync = false;
   }
 }
+
 function route(view, projectId = null, filter = "all") {
   const params = new URLSearchParams();
   if (projectId) params.set("project", projectId);
@@ -184,6 +232,7 @@ function route(view, projectId = null, filter = "all") {
     render();
   } else location.hash = value;
 }
+
 function readRoute() {
   const [view, query] = (location.hash.slice(1) || "overview").split("?");
   state.view = ["overview", "attention", "sessions", "todos"].includes(view)
@@ -194,15 +243,16 @@ function readRoute() {
   state.filter = q.get("filter") || "all";
   state.query = "";
   state.limit = 40;
-  state.expandedProjects.clear();
   closeOverlay();
 }
+
 function rememberFocus() {
   const el = document.activeElement;
   return el?.id
     ? { id: el.id, start: el.selectionStart, end: el.selectionEnd }
     : null;
 }
+
 function restoreFocus(f) {
   if (!f) return;
   const el = document.getElementById(f.id);
@@ -210,97 +260,188 @@ function restoreFocus(f) {
   if (el?.setSelectionRange && typeof f.start === "number")
     el.setSelectionRange(f.start, f.end);
 }
+
+function todoToggle() {
+  const open = activeTodos();
+  const due = open.some((t) => t.dueDate && t.dueDate <= today());
+  return `<button class="secondary todo-toggle ${state.view === "todos" && !state.project ? "active" : ""}" data-action="todos" aria-haspopup="dialog" title="查看待办 (T)">${icon("list-checks")}<span>待办</span><span class="todo-count ${due ? "due" : open.length ? "has" : ""}">${open.length}</span></button>`;
+}
+
 function navigation() {
   const d = state.data;
+  const unread = unreadTotal();
+  const hasBadge =
+    !state.error && d.unreadBadge?.known && d.unreadBadge.count > 0;
   const nav = [
-    ["overview", "panels-top-left", "项目总览", d.projects.length],
-    ["attention", "inbox", "待我处理", unreadTotal()],
-    ["sessions", "messages-square", "全部会话", d.sessions.length],
-    ["todos", "list-todo", "我的待办", activeTodos().length],
+    ["overview", "layout-grid", "项目总览", d.projects.length, false],
+    ["attention", "inbox", "待我处理", unread, Boolean(unread && unread > 0)],
+    ["sessions", "messages-square", "全部会话", d.sessions.length, false],
   ];
-  return `<header class="top-nav"><nav class="nav" aria-label="主导航">${nav.map(([v, i, t, n]) => `<button data-action="nav" data-view="${v}" class="${state.view === v ? "active" : ""}" ${v === "overview" && !state.error && d.unreadBadge?.known && d.unreadBadge.count > 0 ? `title="${d.unreadBadge.count} 个未读会话"` : ""} ${state.view === v ? 'aria-current="page"' : ""}>${v === "overview" ? `<span class="nav-brand" aria-hidden="true"><span class="brand-mark"></span>${!state.error && d.unreadBadge?.known && d.unreadBadge.count > 0 ? '<span class="unread-indicator"></span>' : ""}</span>` : icon(i)}<span>${t}</span><span class="count">${n ?? "—"}</span></button>`).join("")}</nav><button class="icon-btn nav-settings" data-action="settings" aria-label="设置" title="设置">${icon("settings-2")}</button></header>`;
+  return `<header class="top-nav"><button class="brand-home" data-action="nav" data-view="overview" title="${hasBadge ? `${d.unreadBadge.count} 个未读会话` : "回到项目总览"}"><span class="nav-brand" aria-hidden="true"><span class="brand-mark"></span>${hasBadge ? '<span class="unread-indicator"></span>' : ""}</span><span class="brand-wordmark">Project Pulse</span></button><nav class="nav" aria-label="主导航">${nav
+    .map(
+      ([v, i, t, n, alert]) =>
+        `<button data-action="nav" data-view="${v}" class="${state.view === v && !state.project ? "active" : ""} ${alert ? "has-alert" : ""}" ${state.view === v && !state.project ? 'aria-current="page"' : ""}>${icon(i)}<span>${t}</span><span class="count">${n === null ? "?" : n}</span></button>`,
+    )
+    .join("")}</nav><div class="header-actions"><span class="sync-label" title="最近同步时间">${relative(d.source.updatedAt)}同步</span><button class="icon-btn ${state.manualSync ? "spinning" : ""}" data-action="refresh" aria-label="刷新项目状态" title="刷新 (R)">${icon("refresh-cw")}</button><button class="icon-btn" data-action="settings" aria-label="连接与数据设置" title="连接与数据">${icon("sliders-horizontal")}</button>${todoToggle()}<button class="primary" data-action="new-todo" aria-label="新建待办" title="新建待办 (N)" ${state.project ? `data-project="${esc(state.project)}"` : ""}>${icon("plus")}<span>新建待办</span></button></div></header>`;
 }
-function stats() {
-  const d = state.data;
-  const items = [
-    ["项目", d.projects.length, "folder", "", "overview", "all"],
-    [
-      "进行中",
-      d.sessions.filter((s) => s.status === "running").length,
-      "activity",
-      "running",
-      "sessions",
-      "running",
-    ],
-    ["完成未读", unreadTotal(), "mail", "unread", "attention", "all"],
-    ["待办", activeTodos().length, "list-todo", "todo", "todos", "all"],
-  ];
-  return `<section class="summary" aria-label="项目状态汇总">${items.map(([t, n, i, cls, v, f]) => `<button class="stat ${cls} ${n ? "has-value" : ""}" data-action="stat" data-view="${v}" data-filter="${f}">${icon(i)}<span>${t}</span><strong title="${n === null ? "阅读状态暂不可用" : t}">${n ?? "—"}</strong></button>`).join("")}</section>`;
-}
-function projectMetric(p, value, label, cls, view, filter = "all") {
-  return `<button class="project-metric ${cls} ${value ? "has-value" : ""}" data-action="project-view" data-id="${esc(p.id)}" data-view="${view}" data-filter="${filter}" aria-label="${esc(p.name)}：${value === null ? "未知" : value} ${label}" title="${value === null ? "阅读状态暂不可用" : label}"><span class="metric-label">${label}</span><strong>${value === null ? "?" : value || "—"}</strong></button>`;
-}
-function projectCard(p) {
-  const tone = p.unread
-    ? "unread"
-    : p.running
-      ? "running"
-      : p.todoCount
-        ? "todo"
-        : "quiet";
-  const expanded = state.expandedProjects.has(p.id);
-  const sessions = expanded
-    ? state.data.sessions
-        .filter((s) => s.projectId === p.id)
-        .sort(
-          (a, b) =>
-            Number(b.needsReview) - Number(a.needsReview) ||
-            (b.status === "running") - (a.status === "running") ||
-            b.updatedAt - a.updatedAt,
-        )
-    : [];
+
+function projectMasthead(p) {
   const path = (p.roots[0] || "").replace(/^\/Users\/[^/]+\//, "~/");
-  return `<article class="project-card ${expanded ? "expanded" : ""}" data-state="${tone}" aria-label="${esc(p.name)}"><div class="project-card-heading"><span class="project-icon">${icon("folder")}</span><button class="project-name" title="${esc(p.name)}" data-action="project" data-id="${esc(p.id)}">${esc(p.name)}</button><button class="icon-btn pin ${p.pinned ? "pinned" : ""}" data-action="pin" data-id="${esc(p.id)}" aria-label="${p.pinned ? "取消置顶" : "置顶"} ${esc(p.name)}" title="${p.pinned ? "取消置顶" : "置顶"}">${icon("pin")}</button></div><span class="project-path" title="${esc(p.roots.join("\n"))}">${esc(path)}</span><div class="project-metrics">${projectMetric(p, p.running, "进行中", "running", "sessions", "running")}${projectMetric(p, p.unreadKnown === false ? null : p.unread, "未读", "unread", "sessions", "unread")}${projectMetric(p, p.todoCount, "待办", "todos", "todos")}${projectMetric(p, p.sessionCount, "会话", "session-count", "sessions")}</div><div class="project-card-footer"><time class="project-updated" title="最近活动">${p.updatedAt ? relative(p.updatedAt) : "—"}</time><div class="project-actions"><button class="icon-btn" data-action="new-todo" data-project="${esc(p.id)}" aria-label="为 ${esc(p.name)} 添加待办" title="添加待办">${icon("plus")}</button><button class="icon-btn expand-toggle" id="expand-${esc(p.id)}" data-action="expand-project" data-id="${esc(p.id)}" aria-label="${expanded ? "收起" : "展开"} ${esc(p.name)} 的会话" title="${expanded ? "收起会话" : "展开会话"}" aria-expanded="${expanded}" aria-controls="project-sessions-${esc(p.id)}">${icon(expanded ? "chevron-up" : "chevron-down")}</button></div></div><section class="project-sessions" id="project-sessions-${esc(p.id)}" aria-label="${esc(p.name)} 的会话" ${expanded ? "" : "hidden"}>${expanded ? `${sessions.length ? sessions.slice(0, 4).map(projectSessionRow).join("") : '<p class="inline-empty">暂无会话</p>'}<div class="project-sessions-footer"><button class="text-btn" data-action="project" data-id="${esc(p.id)}">全部会话 <span>${p.sessionCount}</span>${icon("arrow-right")}</button></div>` : ""}</section></article>`;
+  const openTodoCount = state.data.todos.filter(
+    (t) => t.projectId === p.id && t.status !== "done",
+  ).length;
+  return `<section class="project-masthead" aria-label="当前项目"><div class="project-masthead-main"><button class="back-btn" data-action="nav" data-view="overview" aria-label="返回项目总览">${icon("arrow-left")}<span>返回总览</span></button><div class="project-masthead-titles"><h1 title="${esc(p.name)}">${esc(p.name)}</h1><span class="project-masthead-path" title="${esc(p.roots.join("\n"))}">${esc(path)}</span></div><button class="icon-btn pin ${p.pinned ? "pinned" : ""}" data-action="pin" data-id="${esc(p.id)}" aria-label="${p.pinned ? "取消置顶" : "置顶"} ${esc(p.name)}" title="${p.pinned ? "取消置顶" : "置顶"}">${icon("pin")}</button></div><div class="project-mode-switch" role="group" aria-label="项目视图切换"><button data-action="project-view" data-id="${esc(p.id)}" data-view="sessions" class="${state.view !== "todos" ? "active" : ""}">会话 ${p.sessionCount}</button><button data-action="project-view" data-id="${esc(p.id)}" data-view="todos" class="${state.view === "todos" ? "active" : ""}">待办 ${openTodoCount}</button></div></section>`;
 }
-function projectSessionRow(s) {
-  return `<article class="project-session"><div class="project-session-heading"><button class="project-session-title" data-action="open" data-id="${esc(s.id)}" title="${esc(s.title)}">${esc(s.title)}</button><button class="icon-btn" data-action="new-todo" data-project="${esc(s.projectId)}" data-session="${esc(s.id)}" aria-label="关联待办：${esc(s.title)}" title="关联待办">${icon("plus")}</button></div><div class="project-session-meta">${badge(s)}<time>${agentLabel(s) ? `${esc(agentLabel(s))} · ` : ""}${relative(s.updatedAt)}</time></div></article>`;
+
+function searchBox(placeholder) {
+  return `<label class="search">${icon("search")}<input id="main-search" aria-label="${placeholder}" placeholder="${placeholder}" value="${esc(state.query)}">${state.query ? `<button type="button" class="icon-btn search-clear" data-action="clear-search" aria-label="清除搜索" title="清除">${icon("x")}</button>` : '<span class="search-kbd" aria-hidden="true">/</span>'}</label>`;
 }
+
+function controls(tabs, placeholder, extra = "") {
+  return `<div class="controls"><div class="tabs" role="group" aria-label="筛选">${tabs
+    .map(
+      ([v, t, count, tone]) =>
+        `<button data-action="filter" data-filter="${v}" class="${state.filter === v ? "active" : ""} ${count === 0 ? "is-zero" : ""}" aria-pressed="${state.filter === v}"><span>${t}</span>${count !== undefined && count !== null ? `<span class="tab-count ${tone && count > 0 ? tone : ""}">${count}</span>` : ""}</button>`,
+    )
+    .join("")}</div><div class="control-actions">${searchBox(placeholder)}${extra}</div></div>`;
+}
+
+function attentionItems() {
+  const since = Date.now() / 1000 - 86400;
+  const byTime = (a, b) => b.updatedAt - a.updatedAt;
+  const sessions = state.data.sessions;
+  return [
+    ...sessions.filter((s) => s.needsReview).sort(byTime),
+    ...sessions
+      .filter((s) => !s.needsReview && s.status === "failed" && s.updatedAt > since)
+      .sort(byTime),
+  ];
+}
+
+function attentionRow(s) {
+  const failed = !s.needsReview;
+  return `<li class="attention-row ${failed ? "" : "is-unread"}"><span class="status-dot ${failed ? "failed" : "unread"}"></span><button class="attention-title" data-action="open" data-id="${esc(s.id)}" title="打开对话：${esc(s.title)}">${esc(s.title)}</button><span class="tag ${failed ? "failed" : "unread"}">${failed ? "运行失败" : "新结果"}</span><button class="attention-project" data-action="project" data-id="${esc(s.projectId)}">${esc(pname(s.projectId))}</button><time>${relative(s.updatedAt)}</time><button class="icon-btn row-add" data-action="new-todo" data-project="${esc(s.projectId)}" data-session="${esc(s.id)}" aria-label="关联待办：${esc(s.title)}" title="关联待办">${icon("plus")}</button></li>`;
+}
+
+function attention() {
+  const items = attentionItems();
+  if (!items.length) return "";
+  const more =
+    items.length > 5
+      ? `<button class="text-btn" data-action="nav" data-view="attention">还有 ${items.length - 5} 项${icon("arrow-right")}</button>`
+      : "";
+  return `<section class="attention" aria-label="待看结果"><div class="section-label"><h2>待看结果</h2><span>${items.length}</span>${more}</div><ul class="attention-list">${items
+    .slice(0, 5)
+    .map(attentionRow)
+    .join("")}</ul></section>`;
+}
+
+function todoLine(t) {
+  const done = t.status === "done";
+  const due = !t.dueDate || done
+    ? ""
+    : t.dueDate === today()
+      ? '<span class="tag failed">今天到期</span>'
+      : t.dueDate < today()
+        ? `<span class="tag failed">逾期 ${esc(t.dueDate.slice(5))}</span>`
+        : `<span>截止 ${esc(t.dueDate.slice(5))}</span>`;
+  const linked = t.sessionId ? session(t.sessionId) : null;
+  return `<li class="todo-line"><button class="check ${done ? "done" : ""}" data-action="toggle-todo" data-id="${esc(t.id)}" aria-label="${done ? "重新打开" : "完成"}待办：${esc(t.title)}" title="${done ? "重新打开" : "完成"}"><span class="check-box">${done ? icon("check") : ""}</span></button><div class="todo-line-main"><button class="todo-line-title ${done ? "done" : ""}" data-action="edit-todo" data-id="${esc(t.id)}" title="编辑待办">${esc(t.title)}</button><div class="todo-line-meta"><button data-action="project-view" data-id="${esc(t.projectId)}" data-view="todos">${esc(pname(t.projectId))}</button>${!done && t.priority === "high" ? '<span class="tag todo">高优先</span>' : ""}${!done && t.status === "doing" ? "<span>进行中</span>" : ""}${due}${
+    t.sessionId
+      ? `<button class="todo-link" data-action="open" data-id="${esc(t.sessionId)}" title="打开关联会话：${esc(linked?.title || "关联会话")}" aria-label="打开关联会话">${icon("message-square")}</button>`
+      : ""
+  }</div></div></li>`;
+}
+
+function projectSignals(p) {
+  const signals = [
+    [p.unread, "unread", "待看", "sessions", "unread"],
+    [p.running, "running", "运行中", "sessions", "running"],
+    [p.todoCount, "todo", "待办", "todos", ""],
+  ].filter(([n]) => n > 0);
+  return signals.length
+    ? `<div class="signals">${signals
+        .map(
+          ([n, tone, label, view, filter]) =>
+            `<button class="signal ${tone}" data-action="project-view" data-id="${esc(p.id)}" data-view="${view}" ${filter ? `data-filter="${filter}"` : ""}>${n} ${label}</button>`,
+        )
+        .join("")}</div>`
+    : "";
+}
+
+function pinButton(p) {
+  return `<button class="icon-btn pin ${p.pinned ? "pinned" : ""}" data-action="pin" data-id="${esc(p.id)}" aria-label="${p.pinned ? "取消置顶" : "置顶"} ${esc(p.name)}" title="${p.pinned ? "取消置顶" : "置顶"}">${icon("pin")}</button>`;
+}
+
+function cardSession(s) {
+  return `<li class="card-session ${s.needsReview ? "is-unread" : ""}"><span class="status-dot ${esc(statusState(s))}" title="${esc(s.needsReview ? "待看结果" : labels[s.status] || "状态未知")}"></span><button class="card-session-title" data-action="open" data-id="${esc(s.id)}" title="打开对话：${esc(s.title)}">${esc(s.title)}</button><time>${relative(s.updatedAt)}</time><button class="icon-btn row-add" data-action="new-todo" data-project="${esc(s.projectId)}" data-session="${esc(s.id)}" aria-label="关联待办：${esc(s.title)}" title="关联待办">${icon("plus")}</button></li>`;
+}
+
+function projectCard(p) {
+  const tone = p.unread ? "unread" : p.running ? "running" : p.todoCount ? "todo" : "quiet";
+  const sessions = sortedProjectSessions(p.id).slice(0, tone !== "quiet" || p.pinned ? 3 : 1);
+  const path = (p.roots[0] || "").replace(/^\/Users\/[^/]+\//, "~/");
+  return `<article class="project-card" data-state="${tone}" aria-label="${esc(p.name)}"><header class="card-head"><h3><button class="project-name" data-action="project" data-id="${esc(p.id)}" title="进入 ${esc(p.name)}">${esc(p.name)}</button></h3>${projectSignals(p)}${pinButton(p)}</header><span class="project-path" title="${esc(p.roots.join("\n"))}">${esc(path)}</span>${
+    sessions.length
+      ? `<ul class="card-sessions">${sessions.map(cardSession).join("")}</ul>`
+      : '<p class="card-empty">暂无会话</p>'
+  }<footer class="card-foot"><span>${p.sessionCount ? `${p.sessionCount} 条会话 · ${relative(p.updatedAt)}` : "暂无动态"}</span><button class="icon-btn" data-action="new-todo" data-project="${esc(p.id)}" aria-label="为 ${esc(p.name)} 添加待办" title="添加待办">${icon("plus")}</button><button class="text-btn" data-action="project" data-id="${esc(p.id)}">全部${icon("arrow-right")}</button></footer></article>`;
+}
+
 function empty(title, iconName = "inbox") {
   return `<div class="empty-state">${icon(iconName)}<p>${title}</p></div>`;
 }
-function controls(tabs, placeholder, extra = "") {
-  return `<div class="controls"><div class="tabs" role="group" aria-label="筛选">${tabs.map(([v, t]) => `<button data-action="filter" data-filter="${v}" class="${state.filter === v ? "active" : ""}" aria-pressed="${state.filter === v}">${t}</button>`).join("")}</div><div class="control-actions"><label class="search">${icon("search")}<input id="main-search" aria-label="${placeholder}" placeholder="${placeholder}" value="${esc(state.query)}"></label>${extra}</div></div>`;
-}
+
 function overview() {
-  let items = sortedProjects().filter((p) =>
-    (p.name + " " + p.roots.join(" "))
-      .toLowerCase()
-      .includes(state.query.toLowerCase()),
-  );
-  if (state.filter === "running") items = items.filter((p) => p.running);
-  if (state.filter === "unread") items = items.filter((p) => p.unread);
+  const all = sortedProjects();
+  const q = state.query.toLowerCase();
+  let items = all.filter((p) => (p.name + " " + p.roots.join(" ")).toLowerCase().includes(q));
+  if (state.filter === "running") items = items.filter((p) => p.running > 0);
+  if (state.filter === "unread") items = items.filter((p) => p.unread > 0);
+  if (state.filter === "todo") items = items.filter((p) => p.todoCount > 0);
   if (state.filter === "pinned") items = items.filter((p) => p.pinned);
-  return `${controls(
+  const pinned = all.filter((p) => p.pinned).length;
+  const count = (fn) => all.filter(fn).length;
+  return `<div class="overview">${attention()}<section class="projects" aria-label="项目"><div class="section-label"><h2>项目</h2></div>${controls(
     [
-      ["all", "全部"],
-      ["running", "进行中"],
-      ["unread", "完成未读"],
-      ["pinned", "已置顶"],
+      ["all", "全部", all.length],
+      ["unread", "待看结果", count((p) => p.unread > 0), "unread"],
+      ["running", "运行中", count((p) => p.running > 0), "running"],
+      ["todo", "有待办", count((p) => p.todoCount > 0), "todo"],
+      ["pinned", "置顶", pinned],
     ],
-    "搜索项目",
-  )}${items.length ? `<section class="project-grid" aria-label="项目列表">${items.map(projectCard).join("")}</section>` : empty("暂无匹配项目", "folder-search")}`;
+    "搜索项目或路径",
+  )}${
+    items.length
+      ? `<div class="project-grid">${items.map(projectCard).join("")}</div>`
+      : empty("没有匹配的项目", "folder-search")
+  }</section></div>`;
 }
+
 function sessionRow(s) {
-  return `<article class="session-row"><span class="dot ${s.needsReview ? "unread" : esc(s.status)}"></span><div class="session-main"><button data-action="open" data-id="${esc(s.id)}" title="${esc(s.title)}">${esc(s.title)}</button><p>${esc(pname(s.projectId))}${agentLabel(s) ? `<span> · ${esc(agentLabel(s))}</span>` : ""}<span> · ${relative(s.updatedAt)}</span></p></div>${badge(s)}<button class="icon-btn" data-action="new-todo" data-project="${esc(s.projectId)}" data-session="${esc(s.id)}" aria-label="关联待办：${esc(s.title)}" title="关联待办">${icon("plus")}</button></article>`;
+  const agent = agentLabel(s);
+  const openHint =
+    s.agent === "claude"
+      ? "终端恢复"
+      : s.agent && s.agent !== "codex"
+        ? "复制命令"
+        : "打开对话";
+  return `<article class="session-row ${s.needsReview ? "is-unread" : s.status === "running" ? "is-running" : ""}"><span class="status-dot ${esc(statusState(s))}"></span><div class="session-main"><button class="session-title" data-action="open" data-id="${esc(s.id)}" title="${openHint}：${esc(s.title)}">${esc(s.title)}</button><div class="session-sub">${
+    !state.project
+      ? `<button class="session-project-btn" data-action="project" data-id="${esc(s.projectId)}">${esc(pname(s.projectId))}</button><span>·</span>`
+      : ""
+  }${agent ? `<span>${esc(agent)}</span><span>·</span>` : ""}${statusText(s)}<span>·</span><time>${relative(s.updatedAt)}</time></div></div><div class="row-actions"><button class="icon-btn" data-action="new-todo" data-project="${esc(s.projectId)}" data-session="${esc(s.id)}" aria-label="关联待办：${esc(s.title)}" title="关联待办">${icon("plus")}</button><button class="icon-btn" data-action="open" data-id="${esc(s.id)}" aria-label="${openHint}：${esc(s.title)}" title="${openHint}">${icon("arrow-up-right")}</button></div></article>`;
 }
+
 function sessionsView() {
   const attention = state.view === "attention";
-  let items = state.data.sessions.filter(
-    (s) =>
-      (!state.project || s.projectId === state.project) &&
-      (s.title + " " + pname(s.projectId))
-        .toLowerCase()
-        .includes(state.query.toLowerCase()),
+  const base = state.data.sessions.filter(
+    (s) => !state.project || s.projectId === state.project,
+  );
+  let items = base.filter((s) =>
+    (s.title + " " + pname(s.projectId) + " " + (s.agentLabel || ""))
+      .toLowerCase()
+      .includes(state.query.toLowerCase()),
   );
   if (attention)
     items = items.filter((s) =>
@@ -310,34 +451,82 @@ function sessionsView() {
     items = items.filter((s) =>
       state.filter === "unread" ? s.needsReview : s.status === state.filter,
     );
-  items.sort((a, b) => b.updatedAt - a.updatedAt);
-  return `${controls(
-    attention
-      ? [
-          ["all", "完成未读"],
-          ["failed", "运行失败"],
-        ]
-      : [
-          ["all", "全部"],
-          ["running", "进行中"],
-          ["unread", "未读"],
-          ["completed", "本轮完成"],
-          ["unknown", "未知"],
+  items.sort(
+    (a, b) =>
+      Number(b.needsReview) - Number(a.needsReview) ||
+      (b.status === "running") - (a.status === "running") ||
+      b.updatedAt - a.updatedAt,
+  );
+
+  const tabs = attention
+    ? [
+        ["all", "待看结果", base.filter((s) => s.needsReview).length, "unread"],
+        [
+          "failed",
+          "运行失败",
+          base.filter((s) => s.status === "failed").length,
         ],
-    "搜索会话",
-  )}${items.length ? `<div class="list-surface">${items.slice(0, state.limit).map(sessionRow).join("")}</div>${items.length > state.limit ? '<button class="more-btn" data-action="more">加载更多</button>' : ""}` : empty(attention ? (state.filter === "failed" ? "暂无失败会话" : state.data.source.readStateAvailable === false ? "阅读状态暂不可用" : "暂无未读结果") : "暂无匹配会话", attention ? "inbox" : "messages-square")}`;
+      ]
+    : [
+        ["all", "全部", base.length],
+        [
+          "running",
+          "正在运行",
+          base.filter((s) => s.status === "running").length,
+          "running",
+        ],
+        [
+          "unread",
+          "待看结果",
+          base.filter((s) => s.needsReview).length,
+          "unread",
+        ],
+        [
+          "completed",
+          "本轮完成",
+          base.filter((s) => s.status === "completed").length,
+        ],
+        [
+          "unknown",
+          "状态未知",
+          base.filter((s) => s.status === "unknown").length,
+        ],
+      ];
+
+  return `${controls(tabs, "搜索会话标题或项目…")}${
+    items.length
+      ? `<div class="list-surface">${items.slice(0, state.limit).map(sessionRow).join("")}</div>${items.length > state.limit ? `<button class="more-btn" data-action="more">加载更多（剩余 ${items.length - state.limit} 条）</button>` : ""}`
+      : empty(
+          attention
+            ? state.filter === "failed"
+              ? "当前没有运行失败的会话"
+              : state.data.source.readStateAvailable === false
+                ? "当前无法读取桌面未读状态"
+                : "所有已完成会话的结果都已查看完毕"
+            : "没有找到匹配的会话",
+          attention ? "check-circle-2" : "messages-square",
+        )
+  }`;
 }
+
 function todoItem(t) {
   const overdue = t.dueDate && t.dueDate < today() && t.status !== "done";
-  return `<article class="todo-item"><button class="check ${t.status === "done" ? "done" : ""}" data-action="toggle-todo" data-id="${esc(t.id)}" aria-label="${t.status === "done" ? "重新打开" : "完成"}待办：${esc(t.title)}"><span class="check-box">${t.status === "done" ? icon("check") : ""}</span></button><div class="todo-info"><button class="todo-title ${t.status === "done" ? "done" : ""}" data-action="edit-todo" data-id="${esc(t.id)}">${esc(t.title)}</button><div class="todo-meta"><button data-action="project" data-id="${esc(t.projectId)}">${esc(pname(t.projectId))}</button>${t.sessionId ? `<button class="todo-session-link" data-action="open" data-id="${esc(t.sessionId)}" title="${esc(session(t.sessionId)?.title || "关联会话")}">${icon("link-2")}<span>${esc(session(t.sessionId)?.title || "关联会话")}</span></button>` : ""}${t.priority === "high" ? '<span class="high">优先</span>' : ""}${t.status === "doing" ? "<span>进行中</span>" : ""}${t.dueDate ? `<span class="${overdue ? "overdue" : ""}">${overdue ? "逾期 " : ""}${esc(t.dueDate.slice(5))}</span>` : ""}</div></div><button class="icon-btn" data-action="edit-todo" data-id="${esc(t.id)}" aria-label="编辑待办：${esc(t.title)}" title="编辑">${icon("pencil")}</button></article>`;
+  const linked = t.sessionId ? session(t.sessionId) : null;
+  return `<article class="todo-item"><button class="check ${t.status === "done" ? "done" : ""}" data-action="toggle-todo" data-id="${esc(t.id)}" aria-label="${t.status === "done" ? "重新打开" : "完成"}待办：${esc(t.title)}"><span class="check-box">${t.status === "done" ? icon("check") : ""}</span></button><div class="todo-info"><button class="todo-title ${t.status === "done" ? "done" : ""}" data-action="edit-todo" data-id="${esc(t.id)}">${esc(t.title)}</button><div class="todo-meta">${
+    !state.project
+      ? `<button data-action="project-view" data-id="${esc(t.projectId)}" data-view="todos">${esc(pname(t.projectId))}</button>`
+      : ""
+  }${t.sessionId ? `<button class="todo-session-link" data-action="open" data-id="${esc(t.sessionId)}" title="打开关联会话：${esc(linked?.title || "关联会话")}">${icon("link-2")}<span>${esc(linked?.title || "关联会话")}</span></button>` : ""}${t.priority === "high" ? '<span class="high">高优先</span>' : ""}${t.status === "doing" ? "<span>进行中</span>" : ""}${t.dueDate ? `<span class="${overdue ? "overdue" : ""}">${overdue ? "已逾期 " : "截止 "}${esc(t.dueDate.slice(5))}</span>` : ""}</div></div><div class="row-actions"><button class="icon-btn" data-action="edit-todo" data-id="${esc(t.id)}" aria-label="编辑待办：${esc(t.title)}" title="编辑">${icon("pencil")}</button></div></article>`;
 }
+
 function todosView() {
-  let todos = state.data.todos.filter(
-    (t) =>
-      (!state.project || t.projectId === state.project) &&
-      (t.title + " " + pname(t.projectId))
-        .toLowerCase()
-        .includes(state.query.toLowerCase()),
+  const base = state.data.todos.filter(
+    (t) => !state.project || t.projectId === state.project,
+  );
+  let todos = base.filter((t) =>
+    (t.title + " " + pname(t.projectId))
+      .toLowerCase()
+      .includes(state.query.toLowerCase()),
   );
   if (state.filter === "all") todos = todos.filter((t) => t.status !== "done");
   else if (state.filter === "high")
@@ -347,22 +536,37 @@ function todosView() {
   else if (state.filter === "doing")
     todos = todos.filter((t) => t.status === "doing");
   todos = sortedTodos(todos);
+
   return `${controls(
     [
-      ["all", "未完成"],
-      ["high", "优先"],
-      ["doing", "进行中"],
-      ["done", "已完成"],
+      ["all", "未完成", base.filter((t) => t.status !== "done").length],
+      [
+        "high",
+        "高优先",
+        base.filter((t) => t.priority === "high" && t.status !== "done").length,
+      ],
+      ["doing", "进行中", base.filter((t) => t.status === "doing").length],
+      ["done", "已完成", base.filter((t) => t.status === "done").length],
     ],
-    "搜索待办",
-    `<button class="icon-btn" data-action="export" aria-label="导出待办" title="导出待办">${icon("download")}</button>`,
-  )}${todos.length ? `<div class="list-surface todo-list">${todos.map(todoItem).join("")}</div>` : empty("暂无待办", "list-todo")}`;
+    "搜索待办内容…",
+    `<button class="secondary" data-action="export" title="导出待办 JSON">${icon("download")}<span>导出</span></button>`,
+  )}${
+    todos.length
+      ? `<div class="list-surface todo-list">${todos.map(todoItem).join("")}</div>`
+      : empty(
+          state.filter === "done"
+            ? "还没有已完成的待办记录"
+            : "当前没有待办事项",
+          "check-square",
+        )
+  }`;
 }
+
 function render() {
   PulseBrand.update(state.data, Boolean(state.error));
   const focus = rememberFocus();
   if (!state.data) {
-    app.innerHTML = `<div class="boot"><span class="brand-mark boot-logo" aria-label="Project Pulse"></span><p>${esc(state.error || "连接中…")}</p>${state.error ? '<button class="secondary" data-action="refresh">重试</button>' : ""}</div>`;
+    app.innerHTML = `<div class="boot"><span class="brand-mark boot-logo" aria-label="Project Pulse"></span><p>${esc(state.error || "正在读取本机项目状态…")}</p>${state.error ? '<button class="secondary" data-action="refresh">重试连接</button>' : ""}</div>`;
     icons();
     return;
   }
@@ -373,10 +577,11 @@ function render() {
     todos: "我的待办",
   }[state.view];
   const selectedProject = project(state.project);
-  app.innerHTML = `<div class="shell">${navigation()}<main class="main" aria-label="${esc(viewName)}"><div class="content">${state.error ? `<div class="notice" role="alert">${esc(state.error)} · 显示上次同步数据</div>` : ""}<div class="dashboard-toolbar">${stats()}<div class="toolbar-actions"><button class="icon-btn" data-action="refresh" aria-label="刷新项目状态" title="刷新 · 最近同步：${relative(state.data.source.updatedAt)}">${icon("refresh-cw")}</button><button class="primary" data-action="new-todo" aria-label="添加待办" title="添加待办" ${selectedProject ? `data-project="${esc(selectedProject.id)}"` : ""}>${icon("plus")}<span>添加待办</span></button></div></div><section class="board">${selectedProject ? `<div class="project-context"><button class="icon-btn" data-action="nav" data-view="overview" aria-label="返回项目总览" title="返回项目">${icon("arrow-left")}</button><h1 title="${esc(selectedProject.name)}">${esc(selectedProject.name)}</h1></div>` : ""}${state.view === "overview" ? overview() : state.view === "todos" ? todosView() : sessionsView()}</section></div></main></div>`;
+  app.innerHTML = `<div class="shell">${navigation()}<main class="main" aria-label="${esc(viewName)}"><div class="content">${state.error ? `<div class="notice" role="alert">${esc(state.error)} · 当前展示上次同步结果</div>` : ""}<section class="board">${selectedProject ? projectMasthead(selectedProject) : ""}${state.view === "overview" ? overview() : state.view === "todos" ? todosView() : sessionsView()}</section></div></main></div>`;
   icons();
   restoreFocus(focus);
 }
+
 let beforeOverlay = null;
 function closeOverlay() {
   PulseControls.destroy();
@@ -396,6 +601,7 @@ function closeOverlay() {
   target?.focus({ preventScroll: true });
   beforeOverlay = null;
 }
+
 function mountOverlay(html) {
   PulseControls.destroy();
   if (!overlay.children.length) beforeOverlay = document.activeElement;
@@ -406,8 +612,38 @@ function mountOverlay(html) {
     overlay.querySelector("[autofocus]") || overlay.querySelector("button");
   focus?.focus({ preventScroll: true });
 }
+
+function dismiss() {
+  if (state.modal === "todo" && state.fromList) {
+    state.fromList = false;
+    showTodos();
+  } else closeOverlay();
+}
+
+function showTodos() {
+  state.modal = "todos";
+  const open = sortedTodos(activeTodos());
+  const done = state.data.todos
+    .filter((t) => t.status === "done")
+    .sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
+  mountOverlay(
+    `<div class="overlay-backdrop" data-action="close"></div><section class="dialog todos-dialog" role="dialog" aria-modal="true" aria-labelledby="todos-title"><div class="dialog-head"><h2 id="todos-title">待办<span class="dialog-count">${open.length}</span></h2><button class="icon-btn" data-action="close" aria-label="关闭待办">${icon("x")}</button></div><div class="todos-body">${
+      open.length
+        ? `<ul class="todo-list-compact">${open.map(todoLine).join("")}</ul>`
+        : '<p class="todos-empty">没有未完成的待办</p>'
+    }${
+      done.length
+        ? `<button class="todo-card-more" data-action="toggle-done" aria-expanded="${state.showDone}"><span>已完成 ${done.length}</span>${icon(state.showDone ? "chevron-up" : "chevron-down")}</button>${
+            state.showDone ? `<ul class="todo-list-compact">${done.slice(0, 30).map(todoLine).join("")}</ul>` : ""
+          }`
+        : ""
+    }</div><div class="todos-foot"><button class="text-btn" data-action="nav" data-view="todos">筛选与导出${icon("arrow-right")}</button></div></section>`,
+  );
+}
+
 function showTodo(id = null, projectId = null, sessionId = null) {
   const t = state.data.todos.find((v) => v.id === id);
+  state.fromList = state.modal === "todos" || (state.modal === "todo" && state.fromList);
   state.modal = "todo";
   const selected = t?.projectId || projectId || state.project || "";
   const selectedSession = t?.sessionId || sessionId || "";
@@ -420,8 +656,8 @@ function showTodo(id = null, projectId = null, sessionId = null) {
     projects.unshift({ value: selected, text: "项目已移除" });
   const fields = PulseControls;
   mountOverlay(
-    `<div class="overlay-backdrop" data-action="close"></div><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="todo-dialog-title"><div class="dialog-head"><h2 id="todo-dialog-title">${t ? "编辑待办" : "添加待办"}</h2><button class="icon-btn" data-action="close" aria-label="关闭待办表单">${icon("x")}</button></div><form id="todo-form" data-id="${esc(t?.id || "")}" novalidate>
-    ${fields.textField({ id: "todo-title", name: "title", label: "待办内容", value: t?.title || "", placeholder: "输入待办内容", required: true, autofocus: true })}
+    `<div class="overlay-backdrop" data-action="close"></div><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="todo-dialog-title"><div class="dialog-head"><h2 id="todo-dialog-title">${t ? "编辑待办" : "新建待办"}</h2><button class="icon-btn" data-action="close" aria-label="关闭待办表单">${icon("x")}</button></div><form id="todo-form" data-id="${esc(t?.id || "")}" novalidate>
+    ${fields.textField({ id: "todo-title", name: "title", label: "待办内容", value: t?.title || "", placeholder: "例如：压测新接口并回归边界用例", required: true, autofocus: true })}
     ${fields.selectField({ id: "todo-project", name: "projectId", label: "关联项目", value: selected, options: [{ value: "", text: "选择项目" }, ...projects], placeholder: "选择项目", searchable: true, required: true })}
     ${fields.selectField({ id: "todo-session", name: "sessionId", label: "关联会话", value: selectedSession, options: sessionOptions(selected, selectedSession), placeholder: selected ? "只绑定项目" : "先选择项目", searchable: true, optional: true, disabled: !selected })}
     <div class="form-row">${fields.selectField({
@@ -440,7 +676,7 @@ function showTodo(id = null, projectId = null, sessionId = null) {
         ? fields.selectField({
             id: "todo-status",
             name: "status",
-            label: "状态",
+            label: "当前状态",
             value: t.status,
             options: [
               { value: "todo", text: "待开始" },
@@ -450,10 +686,11 @@ function showTodo(id = null, projectId = null, sessionId = null) {
           })
         : ""
     }
-    <p class="dialog-error" id="form-error" role="alert"></p><div class="dialog-footer">${t ? `<button type="button" class="secondary" data-action="delete-todo" data-id="${esc(t.id)}">删除</button>` : ""}<button type="button" class="secondary" data-action="close">取消</button><button class="primary" type="submit">${t ? "保存" : "添加"}</button></div></form></section>`,
+    <p class="dialog-error" id="form-error" role="alert"></p><div class="dialog-footer">${t ? `<button type="button" class="secondary" data-action="delete-todo" data-id="${esc(t.id)}">删除</button>` : ""}<button type="button" class="secondary" data-action="close">取消</button><button class="primary" type="submit">${t ? "保存修改" : "添加待办"}</button></div></form></section>`,
   );
   PulseControls.mount(overlay);
 }
+
 function sessionOptions(projectId, selected = "") {
   const choices = state.data.sessions
     .filter((s) => s.projectId === projectId)
@@ -463,12 +700,18 @@ function sessionOptions(projectId, selected = "") {
     choices.unshift({ value: selected, text: "已归档的关联会话" });
   return [{ value: "", text: "只绑定项目" }, ...choices];
 }
+
 function settings() {
   state.modal = "settings";
+  const activeSources = (state.data.source.sources || [])
+    .filter((s) => s.ok)
+    .map((s) => `${s.label} (${s.count})`)
+    .join(" · ");
   mountOverlay(
-    `<div class="overlay-backdrop" data-action="close"></div><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div class="dialog-head"><h2 id="settings-title" class="settings-title"><span class="brand-mark" aria-hidden="true"></span>连接与数据</h2><button class="icon-btn" data-action="close" aria-label="关闭设置">${icon("x")}</button></div><div class="settings-copy"><span class="source-badge">${icon("shield-check")}本机只读连接</span><p>${esc(state.data.source.scope)}</p><p>项目和会话来自当前电脑的 ${esc((state.data.source.sources || []).filter((s) => s.ok).map((s) => s.label).join("、") || "Codex")}。待办和置顶独立保存。</p><p>点击会话打开原对话：Codex 跳转桌面 App，Claude Code 在终端恢复，其他 agent 复制恢复命令。未读只跟随 Codex 桌面的阅读状态。</p><ul>${state.data.source.limitations.map((l) => `<li>${esc(l)}</li>`).join("")}</ul><p>不会上传项目和会话，不需要 API Key。请勿将此本机面板公开部署。</p><button class="secondary" data-action="export">${icon("download")}导出待办与项目清单</button></div></section>`,
+    `<div class="overlay-backdrop" data-action="close"></div><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div class="dialog-head"><h2 id="settings-title" class="settings-title"><span class="brand-mark" aria-hidden="true"></span>连接与数据</h2><button class="icon-btn" data-action="close" aria-label="关闭设置">${icon("x")}</button></div><div class="settings-copy"><div class="source-line">${icon("shield-check")}<span>本机只读连接 · ${esc(activeSources || "Codex")}</span></div><p>${esc(state.data.source.scope)}</p><p>点击会话标题可直接回到原对话：Codex 唤起桌面应用，Claude Code 在终端恢复，其他工具复制恢复命令。个人待办与置顶独立保存在本机 SQLite。</p><ul>${state.data.source.limitations.map((l) => `<li>${esc(l)}</li>`).join("")}</ul><p>快捷键：按 / 搜索，按 N 新建待办，按 R 立即刷新。</p><button class="secondary" data-action="export">${icon("download")}<span>导出待办与项目清单</span></button></div></section>`,
   );
 }
+
 async function actionClick(event) {
   const button = event.target.closest("[data-action]");
   if (!button || button.disabled) return;
@@ -478,30 +721,33 @@ async function actionClick(event) {
       case "nav":
         route(view);
         break;
-      case "stat":
-        route(view, null, filter);
-        break;
       case "project":
         route("sessions", id);
         break;
       case "project-view":
-        route(view, id, filter);
+        route(view, id, filter || "all");
         break;
-      case "expand-project": {
-        const wasExpanded = state.expandedProjects.has(id);
-        state.expandedProjects.clear();
-        if (!wasExpanded) state.expandedProjects.add(id);
-        render();
+      case "toggle-done":
+        state.showDone = !state.showDone;
+        showTodos();
         break;
-      }
+      case "todos":
+        showTodos();
+        break;
       case "filter":
         state.filter = filter;
         state.limit = 40;
         render();
         break;
+      case "clear-search":
+        state.query = "";
+        state.limit = 40;
+        render();
+        document.querySelector("#main-search")?.focus();
+        break;
       case "refresh":
-        await refresh();
-        toast(state.error || "已同步");
+        await refresh(false, true);
+        toast(state.error || "已同步最新状态");
         break;
       case "pin":
         await request("/api/pin", { id, pinned: !project(id)?.pinned });
@@ -512,7 +758,11 @@ async function actionClick(event) {
         try {
           const opened = await request("/api/open", { id });
           if (opened?.dispatched === false && opened.command) {
-            toast((await copyText(opened.command)) ? "已复制恢复命令，在终端粘贴运行" : opened.command);
+            toast(
+              (await copyText(opened.command))
+                ? "已复制恢复命令，请在终端粘贴运行"
+                : opened.command,
+            );
           } else {
             toast(opened?.command ? "已在终端恢复对话" : "已请求打开对话");
           }
@@ -527,32 +777,33 @@ async function actionClick(event) {
         showTodo(id);
         break;
       case "toggle-todo": {
-        const t = state.data.todos.find((t) => t.id === id);
+        const t = state.data.todos.find((item) => item.id === id);
+        if (!t) break;
         button.disabled = true;
         await request("/api/todo", {
           id,
           status: t.status === "done" ? "todo" : "done",
         });
         await refresh();
-        toast(t.status === "done" ? "已重新打开" : "已完成");
+        if (state.modal === "todos") showTodos();
+        toast(t.status === "done" ? "待办已重新打开" : "待办已完成");
         break;
       }
-      case "delete-todo": {
+      case "delete-todo":
         button.dataset.action = "confirm-delete";
         button.textContent = "确认删除";
         break;
-      }
       case "confirm-delete":
         await request("/api/delete-todo", { id });
-        closeOverlay();
         await refresh();
+        dismiss();
         toast("待办已删除");
         break;
       case "settings":
         settings();
         break;
       case "close":
-        closeOverlay();
+        dismiss();
         break;
       case "more":
         state.limit += 40;
@@ -579,37 +830,33 @@ async function actionClick(event) {
     toast(e.message);
   }
 }
+
 document.addEventListener("click", (event) => {
-  const closeProject =
-    state.expandedProjects.size &&
-    !event.target.closest(".project-card.expanded, #overlay");
-  if (closeProject) {
-    state.expandedProjects.clear();
-    // Hide immediately; actionClick can still use the original clicked element.
-    document.querySelectorAll(".project-card.expanded").forEach((card) => {
-      card.classList.remove("expanded");
-      card.querySelector(".project-sessions").hidden = true;
-      const toggle = card.querySelector(".expand-toggle");
-      toggle.setAttribute("aria-expanded", "false");
-      toggle.setAttribute(
-        "aria-label",
-        `展开 ${project(toggle.dataset.id)?.name || "项目"} 的会话`,
-      );
-      toggle.title = "展开会话";
-      toggle.innerHTML = icon("chevron-down");
-    });
-  }
   actionClick(event);
-  if (closeProject) icons();
 });
-document.addEventListener("input", (event) => {
-  if (event.target.id === "todo-title") PulseControls.setError(event.target);
+
+document.addEventListener("compositionstart", (event) => {
+  if (event.target.id === "main-search") composing = true;
+});
+
+document.addEventListener("compositionend", (event) => {
   if (event.target.id === "main-search") {
+    composing = false;
     state.query = event.target.value;
     state.limit = 40;
     render();
   }
 });
+
+document.addEventListener("input", (event) => {
+  if (event.target.id === "todo-title") PulseControls.setError(event.target);
+  if (event.target.id === "main-search" && !composing && !event.isComposing) {
+    state.query = event.target.value;
+    state.limit = 40;
+    render();
+  }
+});
+
 document.addEventListener("change", (event) => {
   if (event.target.id === "todo-project") {
     PulseControls.replaceOptions(
@@ -620,6 +867,7 @@ document.addEventListener("change", (event) => {
     );
   }
 });
+
 document.addEventListener("submit", async (event) => {
   if (event.target.id !== "todo-form") return;
   event.preventDefault();
@@ -632,25 +880,36 @@ document.addEventListener("submit", async (event) => {
   if (form.dataset.id) values.id = form.dataset.id;
   try {
     await request("/api/todo", values);
-    closeOverlay();
     await refresh();
+    dismiss();
     toast("待办已保存");
   } catch (e) {
     document.querySelector("#form-error").textContent = e.message;
     button.disabled = false;
   }
 });
+
 document.addEventListener("keydown", (event) => {
   if (event.defaultPrevented) return;
+  const tag = document.activeElement?.tagName;
+  const typing =
+    tag === "INPUT" ||
+    tag === "TEXTAREA" ||
+    tag === "SELECT" ||
+    document.activeElement?.isContentEditable;
+
   if (event.key === "Escape") {
-    if (overlay.children.length) closeOverlay();
-    else if (state.expandedProjects.size) {
-      const id = [...state.expandedProjects][0];
-      state.expandedProjects.clear();
+    if (overlay.children.length) {
+      dismiss();
+      return;
+    }
+    if (state.query) {
+      state.query = "";
       render();
-      document.getElementById(`expand-${id}`)?.focus({ preventScroll: true });
+      return;
     }
   }
+
   if (event.key === "Tab" && overlay.children.length) {
     const elements = PulseControls.focusable(overlay);
     const first = elements[0],
@@ -662,16 +921,45 @@ document.addEventListener("keydown", (event) => {
       event.preventDefault();
       first?.focus();
     }
+    return;
+  }
+
+  if (
+    !overlay.children.length &&
+    !typing &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.altKey
+  ) {
+    if (event.key === "/") {
+      const search = document.querySelector("#main-search");
+      if (search) {
+        event.preventDefault();
+        search.focus();
+      }
+    } else if (event.key === "t" || event.key === "T") {
+      event.preventDefault();
+      showTodos();
+    } else if (event.key === "n" || event.key === "N") {
+      event.preventDefault();
+      showTodo(null, state.project);
+    } else if (event.key === "r" || event.key === "R") {
+      event.preventDefault();
+      refresh(false, true).then(() => toast(state.error || "已同步最新状态"));
+    }
   }
 });
+
 window.addEventListener("hashchange", () => {
   readRoute();
   render();
   window.scrollTo({ top: 0 });
 });
+
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) refresh();
 });
+
 readRoute();
 refresh(true);
 setInterval(() => {

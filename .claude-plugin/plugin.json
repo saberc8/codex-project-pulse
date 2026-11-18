@@ -1,6 +1,6 @@
 {
   "name": "codex-project-pulse",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Project dashboard for Codex, Claude Code and magpie sessions: activity, unread results and linked todos.",
   "author": {
     "name": "saber",

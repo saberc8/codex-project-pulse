@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "codex-project-pulse",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A desktop plugin for project activity, unread results, and linked todos across Codex, Claude Code and magpie sessions.",
   "author": {
     "name": "saber",

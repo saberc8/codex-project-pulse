@@ -1,7 +1,42 @@
 :root {
   --canvas: #ffffff;
-  --ink: #252525;
-  --muted: #8a8a8a;
-  --accent: #202020;
-  --line: #e8e8e8;
+  --bg-app: #f9f8f6;
+  --surface: #f5f4f1;
+  --surface-hover: #f0efec;
+  --surface-active: #e9e7e3;
+  --ink: #1a1917;
+  --ink-2: #45433e;
+  --muted: #8c8982;
+  --accent: #1a1917;
+  --accent-hover: #34322e;
+  --line: #ebe9e4;
+  --line-soft: #f1efeb;
+  --line-strong: #dad7d0;
+  --focus: rgba(26, 25, 23, 0.12);
+
+  --unread: #2f6bff;
+  --unread-ink: #1f55d6;
+  --unread-tint: #e9f0ff;
+  --unread-wash: #f4f7ff;
+  --unread-ring: rgba(47, 107, 255, 0.18);
+  --unread-line: #d3e0ff;
+  --running: #12a594;
+  --running-ink: #0b7d70;
+  --running-tint: #e0f5f1;
+  --running-wash: #f3fbf9;
+  --running-line: #cdeee7;
+  --todo: #e9954f;
+  --todo-ink: #b4642a;
+  --todo-tint: #fcefe2;
+  --todo-wash: #fffaf5;
+  --todo-line: #f4e2cf;
+  --danger: #e5484d;
+  --danger-tint: #fdeced;
+  --done: #c9c6bf;
+
+  --radius: 12px;
+  --fs-heading: 15px;
+  --fs-body: 13.5px;
+  --fs-meta: 12px;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
 }
