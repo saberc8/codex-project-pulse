@@ -66,6 +66,18 @@
       optional,
     );
   }
+  function segmentedField({ id, name, label, options, value = "" }) {
+    return field(
+      id,
+      label,
+      `<div class="seg" role="radiogroup" aria-labelledby="${escape(id)}-label">${options
+        .map(
+          (item) =>
+            `<label class="seg-item"><input type="radio" name="${escape(name)}" value="${escape(item.value)}" ${String(item.value) === String(value) ? "checked" : ""}><span>${escape(item.text)}</span></label>`,
+        )
+        .join("")}</div>`,
+    );
+  }
   function dateField({ id, name, label, value = "", optional = true }) {
     return field(
       id,
@@ -131,7 +143,7 @@
     const title = form.elements.namedItem("title");
     const project = form.elements.namedItem("projectId");
     setError(title, title.value.trim() ? "" : "请输入待办内容");
-    setError(project, project.value ? "" : "请选择关联项目");
+    setError(project, project.value ? "" : "请选择项目");
     const invalid = !title.value.trim()
       ? title
       : !project.value
@@ -406,6 +418,7 @@
   window.PulseControls = {
     textField,
     selectField,
+    segmentedField,
     dateField,
     mount,
     destroy,
