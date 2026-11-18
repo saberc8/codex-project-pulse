@@ -6,7 +6,7 @@
   --surface-active: #e9e7e3;
   --ink: #1a1917;
   --ink-2: #45433e;
-  --muted: #8c8982;
+  --muted: #73706a;
   --accent: #1a1917;
   --accent-hover: #34322e;
   --line: #ebe9e4;
@@ -32,6 +32,8 @@
   --todo-line: #f4e2cf;
   --danger: #e5484d;
   --danger-tint: #fdeced;
+  --danger-wash: #fef6f6;
+  --danger-line: #f5d4d6;
   --done: #c9c6bf;
 
   --radius: 12px;

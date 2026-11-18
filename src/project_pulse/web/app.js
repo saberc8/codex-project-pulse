@@ -8,6 +8,7 @@ const state = {
   filter: "all",
   project: null,
   query: "",
+  draftTodo: "",
   limit: 40,
   restLimit: 8,
   error: "",
@@ -17,6 +18,7 @@ const state = {
   manualSync: false,
 };
 let composing = false;
+let inflight = null;
 
 const labels = {
   running: "正在运行",
@@ -65,12 +67,23 @@ const today = () =>
   }).format(new Date());
 
 const activeTodos = () => state.data.todos.filter((t) => t.status !== "done");
+const recentFailure = (s) => s.status === "failed" && s.updatedAt > Date.now() / 1000 - 86400;
+const needsLook = (s) => s.needsReview || recentFailure(s);
+const urgentTodo = (t) => t.priority === "high" || (t.dueDate && t.dueDate <= today());
+
+function recentFailedCount(projectId) {
+  return state.data.sessions.filter((s) => s.projectId === projectId && !s.needsReview && recentFailure(s)).length;
+}
+
+function projectReviewCount(p) {
+  return (p.unread || 0) + recentFailedCount(p.id);
+}
 
 function sortedProjects() {
   return [...state.data.projects].sort(
     (a, b) =>
       Number(b.pinned) - Number(a.pinned) ||
-      (b.unread > 0) - (a.unread > 0) ||
+      (projectReviewCount(b) > 0) - (projectReviewCount(a) > 0) ||
       (b.running > 0) - (a.running > 0) ||
       (b.todoCount > 0) - (a.todoCount > 0) ||
       b.updatedAt - a.updatedAt,
@@ -172,28 +185,35 @@ async function request(url, body, retried = false) {
   return value;
 }
 
-async function refresh(initial = false, manual = false) {
-  if (state.busy) return;
+async function refresh(initial = false, manual = false, force = false) {
+  if (inflight) {
+    if (!force && !manual) return inflight;
+    await inflight.catch(() => {});
+  }
   state.busy = true;
   state.manualSync = manual;
   if (manual) render();
-  try {
-    if (initial || !state.token) {
-      const boot = await request("/api/bootstrap");
-      state.token = boot.token;
-      state.data = boot.data;
-    } else {
-      state.data = await request("/api/snapshot");
+  inflight = (async () => {
+    try {
+      if (initial || !state.token) {
+        const boot = await request("/api/bootstrap");
+        state.token = boot.token;
+        state.data = boot.data;
+      } else {
+        state.data = await request("/api/snapshot");
+      }
+      state.error = "";
+      render();
+    } catch (e) {
+      state.error = e.message;
+      render();
+    } finally {
+      state.busy = false;
+      state.manualSync = false;
+      inflight = null;
     }
-    state.error = "";
-    render();
-  } catch (e) {
-    state.error = e.message;
-    render();
-  } finally {
-    state.busy = false;
-    state.manualSync = false;
-  }
+  })();
+  return inflight;
 }
 
 function route(view, projectId = null, filter = "all") {
@@ -207,14 +227,16 @@ function route(view, projectId = null, filter = "all") {
   } else location.hash = value;
 }
 
-const legacyFilters = { attention: "review", todos: "todo", sessions: "all" };
+const legacyFilters = { attention: "review", todos: "todo", sessions: "all", projects: "all" };
 const listFilters = ["all", "review", "running", "todo", "done"];
 
 function readRoute() {
   const [view, query] = (location.hash.slice(1) || "overview").split("?");
   const q = new URLSearchParams(query);
+  const nextProject = q.get("project");
+  if (nextProject !== state.project) state.draftTodo = "";
   state.view = "overview";
-  state.project = q.get("project");
+  state.project = nextProject;
   const filter = q.get("filter") || legacyFilters[view] || "all";
   state.filter = listFilters.includes(filter) ? filter : "all";
   state.query = "";
@@ -263,10 +285,6 @@ function controls(tabs, placeholder, extra = "") {
     .join("")}</div><div class="control-actions">${searchBox(placeholder)}${extra}</div></div>`;
 }
 
-const recentFailure = (s) => s.status === "failed" && s.updatedAt > Date.now() / 1000 - 86400;
-const needsLook = (s) => s.needsReview || recentFailure(s);
-const urgentTodo = (t) => t.priority === "high" || (t.dueDate && t.dueDate <= today());
-
 function sessionTags(s) {
   if (s.needsReview) return '<span class="tag blue">新结果</span>';
   if (s.status === "failed") return '<span class="tag red">运行失败</span>';
@@ -291,7 +309,11 @@ function listModel() {
   const d = state.data;
   const inProject = (x) => !state.project || x.projectId === state.project;
   const q = state.query.toLowerCase();
-  const matches = (text, projectId) => !q || (text + " " + pname(projectId)).toLowerCase().includes(q);
+  const matches = (text, projectId) => {
+    if (!q) return true;
+    const roots = project(projectId)?.roots.join(" ") || "";
+    return (text + " " + pname(projectId) + " " + roots).toLowerCase().includes(q);
+  };
   const sessions = d.sessions.filter((s) => inProject(s) && matches(s.title + " " + (s.agentLabel || ""), s.projectId));
   const todos = d.todos.filter((t) => inProject(t) && matches(t.title, t.projectId));
   const open = sortedTodos(todos.filter((t) => t.status !== "done"));
@@ -335,11 +357,13 @@ function inbox() {
   const m = listModel();
   const f = state.filter;
   const items = m[f] || m.all;
-  const urgent = m.review.length + m.todo.length;
+  const globalReview = state.data.sessions.filter(needsLook).length;
+  const globalRunning = state.data.sessions.filter((s) => !needsLook(s) && s.status === "running").length;
+  const urgent = globalReview + activeTodos().length;
   const headline = state.project
     ? ""
     : `<h1 class="headline">${
-        urgent ? `有 ${urgent} 件事等你处理` : m.running.length ? `${m.running.length} 个会话正在运行` : "没有要你处理的事"
+        urgent ? `有 ${urgent} 件事等你处理` : globalRunning ? `${globalRunning} 个会话正在运行` : "没有要你处理的事"
       }</h1>`;
   const tabs = [
     ["all", "全部", m.all.length],
@@ -356,16 +380,14 @@ function inbox() {
       : "";
   const bar = controls(tabs, state.project ? "搜索这个项目的会话或待办" : "搜索项目、会话或待办");
   if (!state.project) return `${headline}${bar}${projectBoard(items, f)}`;
-  const quickAdd = `<form id="quick-add" class="quick-add" autocomplete="off">${icon("plus")}<input id="quick-add-input" name="title" maxlength="240" placeholder="输入待办，回车创建" aria-label="快速添加待办"><button class="primary" type="submit">添加</button></form>`;
+  const quickAdd = `<form id="quick-add" class="quick-add" autocomplete="off">${icon("plus")}<input id="quick-add-input" name="title" maxlength="240" value="${esc(state.draftTodo)}" placeholder="输入待办，回车创建" aria-label="快速添加待办"><button class="primary" type="submit">添加</button></form>`;
   if (f === "all") {
-    const S = (s) => ["s", s];
-    const T = (t) => ["t", t];
     const rest = items.filter(([k, x]) => k === "s" && !needsLook(x) && x.status !== "running");
     const groupCard = ([title, target, list]) => {
       const open = target !== "";
       const cap = open ? 6 : state.restLimit;
       const more = list.length - Math.min(list.length, cap);
-      return `<section class="detail-group"><header class="group-head"><h3>${title}<span class="group-count">${list.length}</span></h3>${
+      return `<section class="detail-group"><header class="group-head"><h2>${title}<span class="group-count">${list.length}</span></h2>${
         open && more > 0 ? `<button class="text-btn" data-action="filter" data-filter="${target}">还有 ${more} 条${icon("arrow-right")}</button>` : ""
       }</header>${target === "todo" ? quickAdd : ""}<ul class="card-rows">${list.slice(0, cap).map(detailRow).join("")}</ul>${
         !open && more > 0
@@ -374,9 +396,9 @@ function inbox() {
       }</section>`;
     };
     const groups = [
-      ["待查看", "review", m.review.map(S)],
-      ["运行中", "running", m.running.map(S)],
-      ["待办", "todo", m.todo.map(T)],
+      ["待查看", "review", m.review],
+      ["运行中", "running", m.running],
+      ["待办", "todo", m.todo],
       ["其他会话", "", rest],
     ].filter(([, , l]) => l.length);
     return `${bar}<div class="detail-groups">${
@@ -395,15 +417,17 @@ function inbox() {
 }
 
 function projectSignals(p) {
+  const failed = recentFailedCount(p.id);
   const signals = [
-    [p.unread, "unread", "待查看", "", "review"],
-    [p.running, "running", "运行中", "", "running"],
-    [p.todoCount, "todo", "待办", "", "todo"],
+    [p.unread, "unread", "待查看", "review"],
+    [failed, "failed", "运行失败", "review"],
+    [p.running, "running", "运行中", "running"],
+    [p.todoCount, "todo", "待办", "todo"],
   ].filter(([n]) => n > 0);
   return signals.length
     ? `<div class="signals">${signals
         .map(
-          ([n, tone, label, view, filter]) =>
+          ([n, tone, label, filter]) =>
             `<button class="signal ${tone}" data-action="project-view" data-id="${esc(p.id)}" data-filter="${filter}">${n} ${label}</button>`,
         )
         .join("")}</div>`
@@ -421,31 +445,34 @@ function cardRow([kind, item]) {
   }
   const s = item;
   const tone = s.needsReview ? "unread" : recentFailure(s) ? "failed" : s.status === "running" ? "running" : "";
-  return `<li class="card-row ${tone ? `is-${tone}` : ""}"><span class="status-dot ${esc(tone || "idle")}" title="${esc(s.needsReview ? "新结果" : labels[s.status] || "状态未知")}"></span><button class="card-row-title" data-action="open" data-id="${esc(s.id)}" title="打开对话：${esc(sessionTitle(s))}">${esc(sessionTitle(s))}</button>${tone ? sessionTags(s) : ""}<time>${relative(s.updatedAt)}</time><button class="icon-btn row-add" data-action="new-todo" data-project="${esc(s.projectId)}" data-session="${esc(s.id)}" aria-label="关联待办：${esc(sessionTitle(s))}" title="关联待办">${icon("plus")}</button></li>`;
+  const dotLabel = s.needsReview ? "新结果" : labels[s.status] || "状态未知";
+  return `<li class="card-row ${tone ? `is-${tone}` : ""}"><span class="status-dot ${esc(tone || "idle")}" role="img" aria-label="${esc(dotLabel)}" title="${esc(dotLabel)}"></span><button class="card-row-title" data-action="open" data-id="${esc(s.id)}" title="打开对话：${esc(sessionTitle(s))}">${esc(sessionTitle(s))}</button>${tone ? sessionTags(s) : ""}<span class="row-end"><time>${relative(s.updatedAt)}</time><button class="icon-btn row-add" data-action="new-todo" data-project="${esc(s.projectId)}" data-session="${esc(s.id)}" aria-label="关联待办：${esc(sessionTitle(s))}" title="关联待办">${icon("plus")}</button></span></li>`;
 }
 
 function detailRow([kind, item]) {
   if (kind === "t") {
     const t = item;
     const done = t.status === "done";
+    const dueTime = t.dueDate && t.dueDate > today() && !done ? `<time>截止 ${esc(t.dueDate.slice(5))}</time>` : "";
+    const sessionBtn = t.sessionId
+      ? `<button class="icon-btn row-add" data-action="open" data-id="${esc(t.sessionId)}" title="打开关联会话：${esc(session(t.sessionId)?.title || "关联会话")}" aria-label="打开关联会话">${icon("message-square")}</button>`
+      : "";
     return `<li class="card-row is-todo ${done ? "is-done" : ""}"><button class="check ${done ? "done" : ""}" data-action="toggle-todo" data-id="${esc(t.id)}" aria-label="${done ? "重新打开" : "完成"}待办：${esc(t.title)}" title="${done ? "重新打开" : "完成"}"><span class="check-box">${done ? icon("check") : ""}</span></button><button class="card-row-title" data-action="edit-todo" data-id="${esc(t.id)}" title="编辑待办">${esc(t.title)}</button>${todoTags(t)}${
-      t.dueDate && t.dueDate > today() && !done ? `<time>截止 ${esc(t.dueDate.slice(5))}</time>` : ""
-    }${
-      t.sessionId
-        ? `<button class="icon-btn row-add" data-action="open" data-id="${esc(t.sessionId)}" title="打开关联会话：${esc(session(t.sessionId)?.title || "关联会话")}" aria-label="打开关联会话">${icon("message-square")}</button>`
-        : ""
+      dueTime || sessionBtn ? `<span class="row-end ${dueTime && !sessionBtn ? "keep-time" : ""}">${dueTime}${sessionBtn}</span>` : ""
     }</li>`;
   }
   const s = item;
   const agent = agentLabel(s);
-  const tone = s.needsReview ? "unread" : recentFailure(s) ? "failed" : s.status === "running" ? "running" : "";
-  return `<li class="card-row ${tone ? `is-${tone}` : ""}"><span class="status-dot ${esc(tone || "idle")}" title="${esc(s.needsReview ? "新结果" : labels[s.status] || "状态未知")}"></span><button class="card-row-title" data-action="open" data-id="${esc(s.id)}" title="打开对话：${esc(sessionTitle(s))}">${esc(sessionTitle(s))}</button>${sessionTags(s)}${agent ? `<span class="row-agent">${esc(agent)}</span>` : ""}<time>${relative(s.updatedAt)}</time><button class="icon-btn row-add" data-action="new-todo" data-project="${esc(s.projectId)}" data-session="${esc(s.id)}" aria-label="关联待办：${esc(sessionTitle(s))}" title="关联待办">${icon("plus")}</button></li>`;
+  const tone = s.needsReview ? "unread" : s.status === "failed" ? "failed" : s.status === "running" ? "running" : "";
+  const dotLabel = s.needsReview ? "新结果" : labels[s.status] || "状态未知";
+  return `<li class="card-row ${tone ? `is-${tone}` : ""}"><span class="status-dot ${esc(tone || "idle")}" role="img" aria-label="${esc(dotLabel)}" title="${esc(dotLabel)}"></span><button class="card-row-title" data-action="open" data-id="${esc(s.id)}" title="打开对话：${esc(sessionTitle(s))}">${esc(sessionTitle(s))}</button>${sessionTags(s)}${agent ? `<span class="row-agent">${esc(agent)}</span>` : ""}<span class="row-end"><time>${relative(s.updatedAt)}</time><button class="icon-btn row-add" data-action="new-todo" data-project="${esc(s.projectId)}" data-session="${esc(s.id)}" aria-label="关联待办：${esc(sessionTitle(s))}" title="关联待办">${icon("plus")}</button></span></li>`;
 }
 
 function projectCard(p, rows, more) {
-  const tone = p.unread ? "unread" : p.running ? "running" : p.todoCount ? "todo" : "quiet";
+  const failed = recentFailedCount(p.id);
+  const tone = p.unread ? "unread" : failed ? "failed" : p.running ? "running" : p.todoCount ? "todo" : "quiet";
   const path = (p.roots[0] || "").replace(/^\/Users\/[^/]+\//, "~/");
-  return `<article class="project-card" data-state="${tone}" aria-label="${esc(p.name)}"><header class="card-head"><h3><button class="project-name" data-action="project-view" data-id="${esc(p.id)}" data-filter="${esc(state.filter)}" title="进入 ${esc(p.name)}">${esc(p.name)}</button></h3>${projectSignals(p)}${pinButton(p)}</header><span class="project-path" title="${esc(p.roots.join("\n"))}">${esc(path)}</span>${
+  return `<article class="project-card" data-state="${tone}" aria-label="${esc(p.name)}"><header class="card-head"><h2><button class="project-name" data-action="project-view" data-id="${esc(p.id)}" data-filter="${esc(state.filter)}" title="进入 ${esc(p.name)}">${esc(p.name)}</button></h2>${projectSignals(p)}${pinButton(p)}</header><span class="project-path" title="${esc(p.roots.join("\n"))}">${esc(path)}</span>${
     rows.length ? `<ul class="card-rows">${rows.map(cardRow).join("")}</ul>` : '<p class="card-empty">暂无会话</p>'
   }<footer class="card-foot"><span>${more > 0 ? `还有 ${more} 条` : p.sessionCount ? `${p.sessionCount} 条会话 · ${relative(p.updatedAt)}` : "暂无动态"}</span><button class="icon-btn" data-action="new-todo" data-project="${esc(p.id)}" aria-label="为 ${esc(p.name)} 添加待办" title="添加待办">${icon("plus")}</button><button class="text-btn" data-action="project-view" data-id="${esc(p.id)}" data-filter="${esc(state.filter)}">全部${icon("arrow-right")}</button></footer></article>`;
 }
@@ -470,7 +497,7 @@ function projectBoard(items, f) {
   return `<div class="project-grid">${projects
     .map((p) => {
       const list = groups.get(p.id) || [];
-      const busy = p.unread || p.running || p.todoCount || p.pinned || f !== "all";
+      const busy = projectReviewCount(p) > 0 || p.running || p.todoCount || p.pinned || f !== "all";
       const rows = list.slice(0, busy ? 3 : 1);
       return projectCard(p, rows, list.length - rows.length);
     })
@@ -634,12 +661,12 @@ async function actionClick(event) {
         document.querySelector("#main-search")?.focus();
         break;
       case "refresh":
-        await refresh(false, true);
+        await refresh(false, true, true);
         toast(state.error || "已同步最新状态");
         break;
       case "pin":
         await request("/api/pin", { id, pinned: !project(id)?.pinned });
-        await refresh();
+        await refresh(false, false, true);
         break;
       case "open":
         button.disabled = true;
@@ -672,7 +699,7 @@ async function actionClick(event) {
           id,
           status: t.status === "done" ? "todo" : "done",
         });
-        await refresh();
+        await refresh(false, false, true);
         toast(t.status === "done" ? "待办已重新打开" : "待办已完成");
         break;
       }
@@ -682,7 +709,7 @@ async function actionClick(event) {
         break;
       case "confirm-delete":
         await request("/api/delete-todo", { id });
-        await refresh();
+        await refresh(false, false, true);
         closeOverlay();
         toast("待办已删除");
         break;
@@ -732,7 +759,10 @@ document.addEventListener("compositionstart", (event) => {
 });
 
 document.addEventListener("compositionend", (event) => {
-  if (event.target.id === "quick-add-input") composing = false;
+  if (event.target.id === "quick-add-input") {
+    composing = false;
+    state.draftTodo = event.target.value;
+  }
   if (event.target.id === "main-search") {
     composing = false;
     state.query = event.target.value;
@@ -743,6 +773,7 @@ document.addEventListener("compositionend", (event) => {
 
 document.addEventListener("input", (event) => {
   if (event.target.id === "todo-title") PulseControls.setError(event.target);
+  if (event.target.id === "quick-add-input") state.draftTodo = event.target.value;
   if (event.target.id === "main-search" && !composing && !event.isComposing) {
     state.query = event.target.value;
     state.limit = 40;
@@ -776,7 +807,8 @@ document.addEventListener("submit", async (event) => {
         priority: "normal",
         status: "todo",
       });
-      await refresh();
+      state.draftTodo = "";
+      await refresh(false, false, true);
       document.querySelector("#quick-add-input")?.focus();
       toast("待办已创建");
     } catch (e) {
@@ -796,7 +828,7 @@ document.addEventListener("submit", async (event) => {
   if (form.dataset.id) values.id = form.dataset.id;
   try {
     await request("/api/todo", values);
-    await refresh();
+    await refresh(false, false, true);
     closeOverlay();
     toast("待办已保存");
   } catch (e) {
@@ -861,7 +893,7 @@ document.addEventListener("keydown", (event) => {
       showTodo(null, state.project);
     } else if (event.key === "r" || event.key === "R") {
       event.preventDefault();
-      refresh(false, true).then(() => toast(state.error || "已同步最新状态"));
+      refresh(false, true, true).then(() => toast(state.error || "已同步最新状态"));
     }
   }
 });
@@ -873,11 +905,11 @@ window.addEventListener("hashchange", () => {
 });
 
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) refresh();
+  if (!document.hidden && !composing) refresh();
 });
 
 readRoute();
 refresh(true);
 setInterval(() => {
-  if (!document.hidden) refresh();
+  if (!document.hidden && !composing) refresh();
 }, 8000);

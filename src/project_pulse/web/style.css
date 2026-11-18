@@ -217,7 +217,9 @@ time,
 
 .board {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 20px;
+  min-width: 0;
 }
 .projects {
   display: grid;
@@ -234,42 +236,31 @@ time,
   line-height: 18px;
   white-space: nowrap;
 }
-.tag.unread,
 .signal.unread {
   background: var(--unread-tint);
   color: var(--unread-ink);
 }
-.tag.running,
+.signal.failed {
+  background: var(--danger-tint);
+  color: var(--danger);
+}
 .signal.running {
   background: var(--running-tint);
   color: var(--running-ink);
 }
-.tag.todo,
 .signal.todo {
   background: var(--todo-tint);
   color: var(--todo-ink);
 }
 
-.card-row.is-unread .card-row-title {
-  color: var(--ink);
-  font-weight: 600;
-}
-.card-row.is-unread time {
-  color: var(--unread-ink);
-}
-
-.tag.failed {
-  background: var(--danger-tint);
-  color: var(--danger);
-}
-
 /* Toolbar */
 .controls {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
+  min-width: 0;
 }
 .control-actions {
   display: flex;
@@ -457,6 +448,7 @@ time,
 .project-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+  align-items: start;
   gap: 12px;
 }
 .project-card {
@@ -475,6 +467,10 @@ time,
 .project-card[data-state="unread"] {
   background: var(--unread-wash);
   border-color: var(--unread-line);
+}
+.project-card[data-state="failed"] {
+  background: var(--danger-wash);
+  border-color: var(--danger-line);
 }
 .project-card[data-state="running"] {
   background: var(--running-wash);
@@ -496,9 +492,10 @@ time,
   gap: 8px;
   min-height: 22px;
 }
-.card-head h3 {
+.card-head h2 {
   min-width: 0;
   flex: 0 1 auto;
+  font-size: inherit;
 }
 .project-name {
   display: block;
@@ -614,20 +611,31 @@ time,
 .card-row.is-todo .check-box {
   border-color: var(--todo);
 }
+.row-end {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 22px;
+  flex-shrink: 0;
+}
 .card-row time {
   padding-right: 4px;
   font-size: var(--fs-meta);
   color: var(--muted);
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 .row-add {
+  position: absolute;
+  right: 0;
   display: none;
   width: 22px;
   height: 22px;
 }
-.card-row:hover time,
-.card-row:focus-within time {
-  display: none;
+.card-row:hover .row-end:not(.keep-time) time,
+.card-row:focus-within .row-end:not(.keep-time) time {
+  visibility: hidden;
 }
 .card-row:hover .row-add,
 .card-row:focus-within .row-add {
@@ -642,11 +650,12 @@ time,
 /* Project detail: status-grouped cards on "全部", one expanded card per tab. */
 .detail-groups {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
   align-items: start;
   gap: 12px;
 }
 .detail-group {
+  min-width: 0;
   padding: 10px 12px 8px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -659,7 +668,7 @@ time,
   gap: 8px;
   margin-bottom: 4px;
 }
-.group-head h3 {
+.group-head h2 {
   display: flex;
   align-items: baseline;
   gap: 6px;
@@ -823,9 +832,16 @@ time,
 .tabs {
   display: inline-flex;
   gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
   padding: 2px;
   border-radius: 9px;
   background: var(--surface-active);
+}
+.tabs::-webkit-scrollbar {
+  display: none;
 }
 .tabs button {
   display: inline-flex;
@@ -833,6 +849,7 @@ time,
   gap: 6px;
   height: 26px;
   padding: 0 10px;
+  border: 1px solid transparent;
   border-radius: 7px;
   color: var(--muted);
   font-size: var(--fs-meta);
@@ -843,11 +860,9 @@ time,
 }
 .tabs .active {
   background: var(--canvas);
+  border-color: var(--line);
   color: var(--ink);
   font-weight: 500;
-  box-shadow:
-    0 0 0 1px var(--line),
-    0 1px 2px rgba(0, 0, 0, 0.04);
 }
 .tab-count {
   color: var(--muted);
@@ -862,13 +877,10 @@ time,
   color: var(--todo-ink);
 }
 .tabs button.is-zero:not(.active) {
-  color: #aeaba4;
+  color: #949089;
 }
 .tabs button.is-zero:not(.active) .tab-count {
-  color: #aeaba4;
-}
-.controls {
-  align-items: center;
+  color: #949089;
 }
 
 .empty-state {
@@ -1086,7 +1098,12 @@ time,
   .pin {
     opacity: 1;
   }
+  .card-row .row-end {
+    position: static;
+    gap: 4px;
+  }
   .card-row .row-add {
+    position: static;
     display: inline-grid;
   }
 }
@@ -1135,10 +1152,6 @@ time,
   }
   .header-actions {
     gap: 2px;
-  }
-
-  .header-actions [data-action="refresh"] {
-    display: none;
   }
 }
 @media (prefers-reduced-motion: reduce) {

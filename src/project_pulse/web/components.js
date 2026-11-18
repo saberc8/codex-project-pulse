@@ -265,12 +265,14 @@
         widget.dropdown_content.style.maxHeight = `${Math.max(48, parseFloat(widget.dropdown.style.maxHeight) - searchHeight - 10)}px`;
       };
       widget.focus_node.setAttribute("aria-required", String(select.required));
-      widget.control_input.placeholder =
-        select.id === "todo-project" ? "搜索项目" : "搜索会话";
-      widget.control_input.setAttribute(
-        "aria-label",
-        widget.control_input.placeholder,
-      );
+      if (widget.control_input) {
+        widget.control_input.placeholder =
+          select.id === "todo-project" ? "搜索项目" : "搜索会话";
+        widget.control_input.setAttribute(
+          "aria-label",
+          widget.control_input.placeholder,
+        );
+      }
       listen(
         widget.focus_node,
         "keydown",
