@@ -21,6 +21,7 @@ const labels = {
   interrupted: "已中断",
   unknown: "状态未知",
 };
+const todoStatuses = { todo: "待开始", doing: "进行中", done: "已完成" };
 const esc = (value) =>
   String(value ?? "").replace(
     /[&<>"']/g,
@@ -329,7 +330,27 @@ function sessionsView() {
 }
 function todoItem(t) {
   const overdue = t.dueDate && t.dueDate < today() && t.status !== "done";
-  return `<article class="todo-item"><button class="check ${t.status === "done" ? "done" : ""}" data-action="toggle-todo" data-id="${esc(t.id)}" aria-label="${t.status === "done" ? "重新打开" : "完成"}待办：${esc(t.title)}"><span class="check-box">${t.status === "done" ? icon("check") : ""}</span></button><div class="todo-info"><button class="todo-title ${t.status === "done" ? "done" : ""}" data-action="edit-todo" data-id="${esc(t.id)}">${esc(t.title)}</button><div class="todo-meta"><button data-action="project" data-id="${esc(t.projectId)}">${esc(pname(t.projectId))}</button>${t.sessionId ? `<button class="todo-session-link" data-action="open" data-id="${esc(t.sessionId)}" title="${esc(session(t.sessionId)?.title || "关联会话")}">${icon("link-2")}<span>${esc(session(t.sessionId)?.title || "关联会话")}</span></button>` : ""}${t.priority === "high" ? '<span class="high">优先</span>' : ""}${t.status === "doing" ? "<span>进行中</span>" : ""}${t.dueDate ? `<span class="${overdue ? "overdue" : ""}">${overdue ? "逾期 " : ""}${esc(t.dueDate.slice(5))}</span>` : ""}</div></div><button class="icon-btn" data-action="edit-todo" data-id="${esc(t.id)}" aria-label="编辑待办：${esc(t.title)}" title="编辑">${icon("pencil")}</button></article>`;
+  const linkedSession = session(t.sessionId);
+  const sessionTitle = linkedSession?.title || "关联会话";
+  const canOpenLinkedChat = linkedSession?.agent === "codex" && linkedSession.url;
+  const canOpenNewChat = !t.sessionId && project(t.projectId)?.roots.length > 0;
+  const canStart = state.data.source.canStartTodoInCodex && t.status === "todo" && (canOpenLinkedChat || canOpenNewChat);
+  const startHint = canOpenLinkedChat ? "打开原对话并复制开始指令" : "打开项目的新对话并预填开始指令";
+  return `<article class="todo-item">
+    <button class="check ${t.status === "done" ? "done" : ""}" data-action="toggle-todo" data-id="${esc(t.id)}" aria-label="${t.status === "done" ? "重新打开" : "完成"}待办：${esc(t.title)}"><span class="check-box">${t.status === "done" ? icon("check") : ""}</span></button>
+    <div class="todo-info">
+      <button class="todo-title ${t.status === "done" ? "done" : ""}" data-action="edit-todo" data-id="${esc(t.id)}">${esc(t.title)}</button>
+      <div class="todo-meta">
+        <span class="todo-status">${todoStatuses[t.status]}</span>
+        <button data-action="project" data-id="${esc(t.projectId)}">${esc(pname(t.projectId))}</button>
+        ${t.sessionId ? `<button class="todo-session-link" data-action="open" data-id="${esc(t.sessionId)}" title="${esc(sessionTitle)}">${icon("link-2")}<span>${esc(sessionTitle)}</span></button>` : ""}
+        ${t.priority === "high" ? '<span class="high">优先</span>' : ""}
+        ${t.dueDate ? `<span class="${overdue ? "overdue" : ""}">${overdue ? "逾期 " : ""}${esc(t.dueDate.slice(5))}</span>` : ""}
+      </div>
+    </div>
+    ${canStart ? `<button class="secondary todo-start" data-action="start-todo" data-id="${esc(t.id)}" aria-label="开始处理 ${esc(t.title)}" title="${startHint}">开始</button>` : ""}
+    <button class="icon-btn" data-action="edit-todo" data-id="${esc(t.id)}" aria-label="编辑待办：${esc(t.title)}" title="编辑">${icon("pencil")}</button>
+  </article>`;
 }
 function todosView() {
   let todos = state.data.todos.filter(
@@ -442,11 +463,7 @@ function showTodo(id = null, projectId = null, sessionId = null) {
             name: "status",
             label: "状态",
             value: t.status,
-            options: [
-              { value: "todo", text: "待开始" },
-              { value: "doing", text: "进行中" },
-              { value: "done", text: "已完成" },
-            ],
+            options: Object.entries(todoStatuses).map(([value, text]) => ({ value, text })),
           })
         : ""
     }
@@ -523,6 +540,15 @@ async function actionClick(event) {
       case "new-todo":
         showTodo(null, button.dataset.project, button.dataset.session);
         break;
+      case "start-todo": {
+        button.disabled = true;
+        const opened = await request("/api/start-todo", { id });
+        toast(opened.prefilled
+          ? "已请求打开新对话。补充预填指令后发送。"
+          : "已复制开始指令。粘贴到原对话，补充要求后发送。");
+        button.disabled = false;
+        break;
+      }
       case "edit-todo":
         showTodo(id);
         break;

@@ -1,6 +1,6 @@
 import copy
 import base64
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import hashlib
 import json
 import os
@@ -15,6 +15,7 @@ import time
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
 
 REPO = Path(__file__).resolve().parents[1]
@@ -180,6 +181,81 @@ class PulseTest(unittest.TestCase):
         self.assertEqual(done['status'],'done')
         restarted.action('delete-todo',{'id':t['id']})
         self.assertEqual(restarted.snapshot()['todos'],[])
+
+    def test_todo_start_copies_the_exact_id_before_opening_the_linked_chat(self):
+        from project_pulse.mcp_server import call
+
+        values = {"title": "Follow up", "projectId": "p1", "sessionId": "s1", "priority": "high", "dueDate": "2026-11-18"}
+        todo = self.service.action("todo", values)
+        other = self.service.action("todo", values)
+        with (
+            patch("project_pulse.server.sys.platform", "darwin"),
+            patch.dict(os.environ, {"PULSE_DISABLE_OPEN": "0"}),
+            patch("project_pulse.server.subprocess.run", return_value=Mock(returncode=0)) as run,
+        ):
+            opened = call(self.service, "dashboard_action", {"action": "start-todo", "values": {"id": todo["id"]}})
+
+        self.assertTrue(opened["dispatched"])
+        self.assertEqual([c.args[0] for c in run.call_args_list], [["/usr/bin/pbcopy"], ["open", "codex://threads/s1"]])
+        prompt = run.call_args_list[0].kwargs["input"].decode("utf-8")
+        self.assertTrue(prompt.startswith("$project-pulse "))
+        self.assertIn(f"`{todo['id']}` 标为进行中", prompt)
+        self.assertNotIn(other["id"], prompt)
+        self.assertEqual(call(self.service, "list_todos", {"id": todo["id"]}), {"todos": [todo]})
+
+        # After the user sends the instruction, the skill updates this exact record.
+        started = call(self.service, "save_todo", {"id": todo["id"], "status": "doing"})
+        self.assertEqual(started, {**todo, "status": "doing", "updatedAt": started["updatedAt"]})
+        self.assertEqual(call(self.service, "list_todos", {"id": other["id"]}), {"todos": [other]})
+
+    def test_todo_start_preserves_the_status_if_copy_or_open_fails(self):
+        todo = self.service.action("todo", {"title": "Follow up", "projectId": "p1", "sessionId": "s1"})
+        with (
+            patch("project_pulse.server.sys.platform", "darwin"),
+            patch.dict(os.environ, {"PULSE_DISABLE_OPEN": "0"}),
+            patch("project_pulse.server.subprocess.run") as run,
+        ):
+            run.side_effect = subprocess.CalledProcessError(1, "/usr/bin/pbcopy")
+            with self.assertRaisesRegex(ValueError, "无法复制开始指令"):
+                self.service.action("start-todo", {"id": todo["id"]})
+            run.assert_called_once()
+
+            run.reset_mock()
+            run.side_effect = [Mock(returncode=0), Mock(returncode=1)]
+            with self.assertRaisesRegex(ValueError, "开始指令已复制"):
+                self.service.action("start-todo", {"id": todo["id"]})
+            self.assertEqual(run.call_count, 2)
+
+        self.assertEqual(self.service.snapshot()["todos"], [todo])
+
+    def test_starting_a_project_only_todo_prefills_a_new_codex_chat(self):
+        from project_pulse.mcp_server import call
+
+        root = self.root / "Project & 示例"
+        root.mkdir()
+        state_file = self.home / ".codex-global-state.json"
+        state = json.loads(state_file.read_text())
+        state["local-projects"]["p1"]["rootPaths"] = [str(root)]
+        state_file.write_text(json.dumps(state))
+        todo = self.service.action("todo", {"title": "Plan export", "projectId": "p1"})
+
+        with (
+            patch("project_pulse.server.sys.platform", "darwin"),
+            patch.dict(os.environ, {"PULSE_DISABLE_OPEN": "0"}),
+            patch("project_pulse.server.subprocess.run", return_value=Mock(returncode=0)) as run,
+        ):
+            opened = call(self.service, "dashboard_action", {"action": "start-todo", "values": {"id": todo["id"]}})
+
+        run.assert_called_once()
+        command, url = run.call_args.args[0]
+        self.assertEqual(command, "open")
+        target = urlsplit(url)
+        self.assertEqual((target.scheme, target.netloc), ("codex", "new"))
+        query = parse_qs(target.query)
+        self.assertEqual(query["path"], [str(root)])
+        self.assertIn(f"`{todo['id']}` 标为进行中", query["prompt"][0])
+        self.assertTrue(opened["dispatched"])
+        self.assertEqual(call(self.service, "list_todos", {"id": todo["id"]}), {"todos": [todo]})
 
     def test_unread_badge_follows_desktop_reads_independent_of_turn_status(self):
         from project_pulse.branding import has_unread

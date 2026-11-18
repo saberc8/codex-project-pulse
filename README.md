@@ -27,6 +27,7 @@ A desktop plugin for Codex and Claude Code that tracks project activity, unread 
 - **真实未读**：跟随 Codex 桌面阅读状态；账号、主机或数据格式无法确认时显示未知，不用历史记录猜测。
 - **直接回到对话**：点击会话标题打开原聊天（Codex 跳转桌面 App，Claude Code 在终端 `claude --resume`，其他 agent 复制恢复命令），行尾加号创建关联待办。
 - **项目与会话待办**：支持优先级、截止日期、状态、编辑、删除和 JSON 导出；数据独立保存在本机。
+- **从待办开始工作**：在 macOS 上点击待办的「开始」。已关联 Codex 对话时打开原对话，并复制带 ID 的指令供粘贴。仅关联项目时在项目内打开新对话并预填指令。补充要求并发送后，Codex 通过插件将该待办标为进行中。
 - **紧凑的原生面板**：白底、中性灰、顶部导航、自适应多列卡片、统一搜索下拉与日历。卡片按未读蓝色、进行中紫色、待办淡橙色显示。
 
 插件由 Skill、stdio MCP 和 MCP App 组成，声明官方 `global` / `thread` 入口。入口位置和图标渲染由客户端决定。另提供相同界面的 localhost 网页供开发和兼容使用。

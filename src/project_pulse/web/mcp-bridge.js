@@ -19,7 +19,7 @@
     else request.resolve(msg.result);
   });
   const ready = rpc('ui/initialize', {
-    appInfo: { name: 'Project Pulse', version: '0.2.0' },
+    appInfo: { name: 'Project Pulse', version: '0.2.2' },
     appCapabilities: {}, protocolVersion: '2026-01-26'
   }).then(() => notify('ui/notifications/initialized', {}));
   // A host may initialize before the main UI asks for data.

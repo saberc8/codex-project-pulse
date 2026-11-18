@@ -21,7 +21,7 @@ TOOLS = [
     {"name": "open_dashboard", "description": "Start or reuse the local Project Pulse dashboard and return its URL for opening in a Codex browser panel.", "inputSchema": schema(), "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
     {"name": "list_projects", "description": "Read local projects with counts of running sessions, completed unread results, and open personal todos: Codex imported projects plus the working folders of Claude Code sessions and other agents magpie lists. Does not read conversation text.", "inputSchema": schema(), "annotations": {"readOnlyHint": True, "openWorldHint": False}},
     {"name": "list_sessions", "description": "List local non-archived main conversations from Codex, Claude Code and agents magpie lists (see each session's agent), optionally filtered by project and running/completed/unread/failed/unknown status. Only Codex has a read state; completion describes a turn, not a whole project.", "inputSchema": schema({"projectId": STRING, "status": {"type": "string", "enum": ["all", "running", "completed", "unread", "failed", "interrupted", "unknown"]}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}), "annotations": {"readOnlyHint": True, "openWorldHint": False}},
-    {"name": "list_todos", "description": "Read personal todos, optionally bound to one project or conversation.", "inputSchema": schema({"projectId": STRING, "sessionId": STRING}), "annotations": {"readOnlyHint": True, "openWorldHint": False}},
+    {"name": "list_todos", "description": "Read personal todos, optionally filtered by exact todo ID, project, or conversation.", "inputSchema": schema({"id": STRING, "projectId": STRING, "sessionId": STRING}), "annotations": {"readOnlyHint": True, "openWorldHint": False}},
     {"name": "save_todo", "description": "Create or update a personal todo bound to a project and optionally a session within it. Supply id to edit. Never changes any agent's conversation data.", "inputSchema": schema({"id": STRING, "title": STRING, "projectId": STRING, "sessionId": {"type": ["string", "null"]}, "priority": {"type": "string", "enum": ["high", "normal", "low"]}, "status": {"type": "string", "enum": ["todo", "doing", "done"]}, "dueDate": {"type": ["string", "null"], "description": "YYYY-MM-DD, or null for no deadline"}}), "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False}},
 ]
 
@@ -36,7 +36,7 @@ TOOLS[0]['_meta'] = {
 TOOLS += [
     {'name': 'dashboard_snapshot', 'description': 'Refresh the private dashboard state.', 'inputSchema': schema(), 'annotations': {'readOnlyHint': True, 'openWorldHint': False}, '_meta': {'ui': {'visibility': ['app']}, 'openai/widgetAccessible': True}},
     {'name': 'dashboard_session', 'description': 'Read the selected conversation final answer.', 'inputSchema': schema({'sessionId': STRING}, ['sessionId']), 'annotations': {'readOnlyHint': True, 'openWorldHint': False}, '_meta': {'ui': {'visibility': ['app']}, 'openai/widgetAccessible': True}},
-    {'name': 'dashboard_action', 'description': 'Apply an explicit user action from the dashboard.', 'inputSchema': schema({'action': {'type': 'string', 'enum': ['todo', 'delete-todo', 'acknowledge', 'pin', 'open']}, 'values': {'type': 'object'}}, ['action', 'values']), 'annotations': {'readOnlyHint': False, 'destructiveHint': True, 'openWorldHint': False}, '_meta': {'ui': {'visibility': ['app']}, 'openai/widgetAccessible': True}},
+    {'name': 'dashboard_action', 'description': 'Apply an explicit user action from the dashboard.', 'inputSchema': schema({'action': {'type': 'string', 'enum': ['todo', 'start-todo', 'delete-todo', 'acknowledge', 'pin', 'open']}, 'values': {'type': 'object'}}, ['action', 'values']), 'annotations': {'readOnlyHint': False, 'destructiveHint': True, 'openWorldHint': False}, '_meta': {'ui': {'visibility': ['app']}, 'openai/widgetAccessible': True}},
 ]
 
 
@@ -74,7 +74,12 @@ def call(service, name, args):
             raise ValueError("Invalid pagination")
         return {"sessions": items[offset:offset + limit], "total": len(items), "nextOffset": offset + limit if offset + limit < len(items) else None}
     if name == "list_todos":
-        return {"todos": [t for t in snapshot["todos"] if (not args.get("projectId") or t["projectId"] == args["projectId"]) and (not args.get("sessionId") or t["sessionId"] == args["sessionId"])]}
+        return {"todos": [
+            todo for todo in snapshot["todos"]
+            if ("id" not in args or todo["id"] == args["id"])
+            and (not args.get("projectId") or todo["projectId"] == args["projectId"])
+            and (not args.get("sessionId") or todo["sessionId"] == args["sessionId"])
+        ]}
     if name == "save_todo":
         return service.store.save_todo(args, snapshot, args.get("id"))
 

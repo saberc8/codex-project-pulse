@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2 — Unreleased
+
+- Show Start for pending project-only todos on macOS. The action opens a new Codex chat in the project with a prefilled todo-specific instruction.
+
+## 0.2.1 — Unreleased
+
+- Added a Start button for pending todos linked to a Codex chat on macOS. It copies a todo-specific instruction and opens the original chat. Sending the instruction lets the plugin mark that todo as in progress.
+
 ## 0.2.0 — 2026-11-17
 
 - Added Claude Code sessions: transcripts in `CLAUDE_CONFIG_DIR`, `~/.claude` and magpie's per-account folders, read head and tail only and cached by size and mtime. Turn state comes from the last message (completed, interrupted, failed; running only while the file was written in the last 30 minutes). Clicking a session resumes it in Terminal with `claude --resume`.

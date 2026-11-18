@@ -11,7 +11,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 from . import __version__
 from .agents import MultiReader, terminal_command
@@ -31,7 +31,9 @@ class Service:
             if force or self.cache is None or time.time() - self.cache_at > 3:
                 self.cache = self.reader.snapshot()
                 self.cache_at = time.time()
-            return self.store.enrich(json.loads(json.dumps(self.cache)))
+            snapshot = self.store.enrich(json.loads(json.dumps(self.cache)))
+            snapshot["source"]["canStartTodoInCodex"] = sys.platform == "darwin" and os.environ.get("PULSE_DISABLE_OPEN") != "1"
+            return snapshot
 
     def session(self, ident):
         result = next((s for s in self.snapshot()["sessions"] if s["id"] == ident), None)
@@ -42,6 +44,8 @@ class Service:
     def action(self, action, values):
         if action == "todo":
             return self.store.save_todo(values, self.snapshot(), values.get("id"))
+        if action == "start-todo":
+            return self.start_todo_in_codex(values.get("id"))
         if action == "delete-todo":
             self.store.delete_todo(values.get("id"))
         elif action == "acknowledge":
@@ -61,6 +65,42 @@ class Service:
         else:
             raise ValueError("未知操作")
         return {"ok": True}
+
+    def start_todo_in_codex(self, ident):
+        snapshot = self.snapshot()
+        if not snapshot["source"]["canStartTodoInCodex"]:
+            raise ValueError("当前环境无法从待办打开 Codex")
+        todo = next((item for item in snapshot["todos"] if item["id"] == ident), None)
+        if todo is None:
+            raise ValueError("待办不存在")
+        if todo["status"] != "todo":
+            raise ValueError("请选择一条待开始的待办")
+
+        prompt = f"$project-pulse 请将待办 ID `{todo['id']}` 标为进行中，然后按下面的说明执行。\n\n"
+        if not todo["sessionId"]:
+            roots = next((p["roots"] for p in snapshot["projects"] if p["id"] == todo["projectId"]), ())
+            root = next((path for path in roots if os.path.isabs(path) and os.path.isdir(path)), None)
+            if root is None:
+                raise ValueError("项目目录不可用，请在编辑待办时选择可用项目")
+            query = urlencode({"path": root, "prompt": prompt}, quote_via=quote)
+            return {**self.open({"url": f"codex://new?{query}"}), "prefilled": True}
+
+        session = next((s for s in snapshot["sessions"] if s["id"] == todo["sessionId"]), None)
+        if session is None or session.get("agent") != "codex" or not session.get("url"):
+            raise ValueError("请先关联可打开的 Codex 对话")
+
+        try:
+            subprocess.run(
+                ["/usr/bin/pbcopy"], input=prompt.encode("utf-8"),
+                env={**os.environ, "LC_ALL": "en_US.UTF-8"},
+                capture_output=True, timeout=5, check=True,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValueError("无法复制开始指令，请重试") from exc
+        try:
+            return self.open(session)
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            raise ValueError("开始指令已复制，请手动打开原对话并粘贴") from exc
 
     def open(self, s):
         """Codex chats open by URL; Claude Code resumes in Terminal; other agents return a command to copy."""
